@@ -5,7 +5,9 @@
 import { std } from '../../../src/std.ts';
 
 export const DEST = 'terrain-data-downloader';
-export const ROUTE_NAME = 'plugin-terrain-data-downloader';
+// Must start with 'home-menu': CloudTAK only opens the side panel for routes named home-menu*
+// (Map.vue noMenuShown). Same convention as Quick Point Dropper / Sidebar Configurator.
+export const ROUTE_NAME = 'home-menu-plugin-terrain-data-downloader';
 export const MENU_KEY = 'plugin-terrain-data-downloader';
 export const COLLECTION = 'Terrain Data Downloader';
 
@@ -14,10 +16,10 @@ const BASE = '/api/plugin/terrain-data-downloader';
 export const ROUTES_MISSING = 'Plugin API routes are not installed (404)';
 
 /**
- * std() for this plugin's own routes. If the routes are not loaded in the CloudTAK API
- * (e.g. the API image was not rebuilt after install), CloudTAK's SPA fallback answers
- * /api/... with index.html and HTTP 200, so std() hands back a raw Response instead of
- * JSON. Turn that into a clear error instead of letting the page render undefined data.
+ * std() for this plugin's own routes. A missing route normally comes back as a 404
+ * ("API endpoint does not exist!"), but a proxy in front of CloudTAK can answer with an
+ * HTML page instead, in which case std() hands back a raw Response rather than JSON.
+ * Turn that into a clear error instead of letting the page render undefined data.
  */
 async function pstd(url: string, opts: Parameters<typeof std>[1] = {}): Promise<unknown> {
     const res = await std(url, opts);

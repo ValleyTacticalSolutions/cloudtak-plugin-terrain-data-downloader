@@ -659,7 +659,7 @@ onMounted(async () => {
         console.error('[terrain-data-downloader] failed to load', err);
         const e = err instanceof Error ? err : new Error(String(err));
         const msg = e.message.toLowerCase();
-        if (msg.includes('404') || msg.includes('not found') || msg.includes('cannot get')) {
+        if (msg.includes('404') || msg.includes('not found') || msg.includes('does not exist') || msg.includes('cannot get')) {
             fatalTitle.value = 'Plugin server routes are not installed';
             fatal.value = new Error('The CloudTAK API does not have this plugin\'s routes yet. Reinstall the plugin from TAK Portal (or copy server/*.ts into api/stateless/routes/) and rebuild the CloudTAK API image, then Settings -> Refresh App.', { cause: e });
         } else if (msg.includes('admin') || msg.includes('403') || msg.includes('401') || msg.includes('permission')) {

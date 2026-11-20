@@ -93,7 +93,7 @@ A single job is limited to 250,000 terrain tiles. Large states such as Alaska ne
 4. **Single API instance.** Job status is kept in memory on the API process that started the job. That is the standard single-container docker-compose deployment. Behind a load balancer with several API tasks, progress polling can land on a different task. Finished files are still written to the bucket and listed under **Admin → Hosted Tilesets**.
 5. After install: **Settings → Refresh App** in CloudTAK (a normal browser refresh is not enough).
 
-**Troubleshooting:** if the page says *Plugin server routes are not installed*, the browser half is installed but the CloudTAK API is not running this plugin's route. CloudTAK answers unknown `/api/...` paths with the app's `index.html` instead of a 404. Make sure `server/plugin-terrain-data-downloader.ts` is in `api/stateless/routes/` and the **API image was rebuilt and restarted**. If it says *CloudTAK system administrators only*, the signed-in account is not a system admin.
+**Troubleshooting:** if the page says *Plugin server routes are not installed*, the browser half is installed but the CloudTAK API is not running this plugin's route (CloudTAK answers `API endpoint does not exist!`). Make sure `server/plugin-terrain-data-downloader.ts` is in `api/stateless/routes/` and the **API image was rebuilt and restarted**. If it says *CloudTAK system administrators only*, the signed-in account is not a system admin.
 
 ### Catalog entry
 ```json
