@@ -16,16 +16,13 @@ export default class TerrainDataDownloader implements PluginInstance {
 
         // Routes are registered once and never removed: CloudTAK may call disable()
         // before enable(), and menu.add() silently fails if its route is missing.
+        // Admin-only is enforced the same way as Sidebar Configurator / Quick Point Dropper:
+        // requiresSystemAdmin on the menu item + Auth.as_user(..., { admin: true }) on every API route.
         this.api.routes.add({
             path: 'plugin-terrain-data-downloader',
             name: ROUTE_NAME,
-            // CloudTAK system administrators only - also enforced by every API route
-            beforeEnter: async () => {
-                const admin = await this.api.profile.get('system_admin');
-                return admin === true ? true : { name: 'home-menu' };
-            },
             component: {
-                render: () => h(MenuTemplate, { name: 'Terrain Data Downloader' }, {
+                render: () => h(MenuTemplate, { name: 'Terrain Data Downloader', back: false }, {
                     default: () => h(TerrainDownloader),
                 }),
             },
@@ -42,9 +39,10 @@ export default class TerrainDataDownloader implements PluginInstance {
             key: MENU_KEY,
             label: 'Terrain Data Downloader',
             route: ROUTE_NAME,
-            tooltip: 'Terrain Data Downloader',
+            tooltip: 'Terrain Data Downloader (Admin)',
             description: 'Download US state terrain and snapping data into CloudTAK',
             icon: IconMountain,
+            badge: 'A',
             requiresSystemAdmin: true,
         });
 

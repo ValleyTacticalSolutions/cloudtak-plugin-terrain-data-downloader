@@ -6,7 +6,7 @@
         />
         <TablerAlert
             v-else-if='fatal'
-            title='Terrain Data Downloader is not available'
+            :title='fatalTitle'
             :err='fatal'
         />
         <template v-else>
@@ -418,6 +418,7 @@ const detailOptions = Object.keys(DETAIL);
 
 const loading = ref(true);
 const fatal = ref<Error | undefined>();
+const fatalTitle = ref('Terrain Data Downloader is not available');
 const states = ref<StateItem[]>([]);
 const selected = ref<Set<string>>(new Set());
 const filter = ref('');
@@ -655,7 +656,18 @@ onMounted(async () => {
             if (latest.status === 'queued' || latest.status === 'running') startPolling(latest.id);
         }
     } catch (err) {
-        fatal.value = err instanceof Error ? err : new Error(String(err));
+        console.error('[terrain-data-downloader] failed to load', err);
+        const e = err instanceof Error ? err : new Error(String(err));
+        const msg = e.message.toLowerCase();
+        if (msg.includes('404') || msg.includes('not found') || msg.includes('cannot get')) {
+            fatalTitle.value = 'Plugin server routes are not installed';
+            fatal.value = new Error('The CloudTAK API does not have this plugin\'s routes yet. Reinstall the plugin from TAK Portal (or copy server/*.ts into api/stateless/routes/) and rebuild the CloudTAK API image, then Settings -> Refresh App.', { cause: e });
+        } else if (msg.includes('admin') || msg.includes('403') || msg.includes('401') || msg.includes('permission')) {
+            fatalTitle.value = 'CloudTAK system administrators only';
+            fatal.value = new Error(`Your account is not a CloudTAK system administrator (server said: ${e.message}).`, { cause: e });
+        } else {
+            fatal.value = e;
+        }
     } finally {
         loading.value = false;
     }

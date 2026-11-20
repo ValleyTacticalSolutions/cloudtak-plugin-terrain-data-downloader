@@ -11,6 +11,22 @@ export const COLLECTION = 'Terrain Data Downloader';
 
 const BASE = '/api/plugin/terrain-data-downloader';
 
+export const ROUTES_MISSING = 'Plugin API routes are not installed (404)';
+
+/**
+ * std() for this plugin's own routes. If the routes are not loaded in the CloudTAK API
+ * (e.g. the API image was not rebuilt after install), CloudTAK's SPA fallback answers
+ * /api/... with index.html and HTTP 200, so std() hands back a raw Response instead of
+ * JSON. Turn that into a clear error instead of letting the page render undefined data.
+ */
+async function pstd(url: string, opts: Parameters<typeof std>[1] = {}): Promise<unknown> {
+    const res = await std(url, opts);
+    if (res instanceof Response) {
+        throw new Error(`${ROUTES_MISSING}: ${url} returned ${res.headers.get('Content-Type') || 'a non-JSON response'}`);
+    }
+    return res;
+}
+
 export interface StateItem {
     slug: string;
     abbr: string;
@@ -77,46 +93,46 @@ export interface ManagedBasemap {
 }
 
 export async function listStates(): Promise<StateItem[]> {
-    const res = await std(`${BASE}/states`) as { items: StateItem[] };
+    const res = await pstd(`${BASE}/states`) as { items: StateItem[] };
     return res.items;
 }
 
 export async function listCategories(): Promise<SnapCategory[]> {
-    const res = await std(`${BASE}/categories`) as { items: SnapCategory[] };
+    const res = await pstd(`${BASE}/categories`) as { items: SnapCategory[] };
     return res.items;
 }
 
 export async function getSettings(): Promise<Settings> {
-    return await std(`${BASE}/settings`) as Settings;
+    return await pstd(`${BASE}/settings`) as Settings;
 }
 
 export async function setDefaultSnapping(id: number | null): Promise<Settings> {
-    return await std(`${BASE}/settings`, { method: 'PUT', body: { snapping: id } }) as Settings;
+    return await pstd(`${BASE}/settings`, { method: 'PUT', body: { snapping: id } }) as Settings;
 }
 
 export async function plan(body: JobRequest): Promise<Plan> {
-    return await std(`${BASE}/plan`, { method: 'POST', body, timeout: 120_000 }) as Plan;
+    return await pstd(`${BASE}/plan`, { method: 'POST', body, timeout: 120_000 }) as Plan;
 }
 
 export async function startJob(body: JobRequest): Promise<Job> {
-    return await std(`${BASE}/job`, { method: 'POST', body }) as Job;
+    return await pstd(`${BASE}/job`, { method: 'POST', body }) as Job;
 }
 
 export async function listJobs(): Promise<Job[]> {
-    const res = await std(`${BASE}/job`) as { items: Job[] };
+    const res = await pstd(`${BASE}/job`) as { items: Job[] };
     return res.items;
 }
 
 export async function getJob(id: string): Promise<Job> {
-    return await std(`${BASE}/job/${encodeURIComponent(id)}`) as Job;
+    return await pstd(`${BASE}/job/${encodeURIComponent(id)}`) as Job;
 }
 
 export async function cancelJob(id: string): Promise<Job> {
-    return await std(`${BASE}/job/${encodeURIComponent(id)}`, { method: 'DELETE' }) as Job;
+    return await pstd(`${BASE}/job/${encodeURIComponent(id)}`, { method: 'DELETE' }) as Job;
 }
 
 export async function deleteHostedFile(file: string): Promise<void> {
-    await std(`${BASE}/file/${encodeURIComponent(file)}`, { method: 'DELETE' });
+    await pstd(`${BASE}/file/${encodeURIComponent(file)}`, { method: 'DELETE' });
 }
 
 /** Hosted tileset file name a plugin-managed basemap points at, e.g. tdd-terrain-z12-co-2026... */

@@ -68,8 +68,9 @@ These choices come from reading CloudTAK's source rather than guessing:
 
 ### Admin only
 
-- The menu entry uses CloudTAK's `requiresSystemAdmin`, so it is hidden from everyone else.
-- The page route has a guard that sends non-admins back to the main menu.
+Enforced the same way as ValleyTacticalSolutions' Sidebar Configurator and Quick Point Dropper:
+
+- The menu entry uses CloudTAK's `requiresSystemAdmin` (with the `A` admin badge), so it is hidden from everyone else.
 - Every plugin API route that reads jobs or changes anything requires a CloudTAK system administrator. The only exception is `GET /settings`, which any signed-in user can read, because each user's browser needs it to preselect the default snapping layer.
 
 Detail levels and rough terrain sizes (about 55 KB per tile):
@@ -91,6 +92,8 @@ A single job is limited to 250,000 terrain tiles. Large states such as Alaska ne
 3. **Temporary disk space in the API container.** Jobs work in the OS temp directory (`/tmp` in the container). Allow roughly 3× the largest selected state's OSM extract plus the terrain output: about 5 GB for California, and under 100 MB for small states.
 4. **Single API instance.** Job status is kept in memory on the API process that started the job. That is the standard single-container docker-compose deployment. Behind a load balancer with several API tasks, progress polling can land on a different task. Finished files are still written to the bucket and listed under **Admin → Hosted Tilesets**.
 5. After install: **Settings → Refresh App** in CloudTAK (a normal browser refresh is not enough).
+
+**Troubleshooting:** if the page says *Plugin server routes are not installed*, the browser half is installed but the CloudTAK API is not running this plugin's route. CloudTAK answers unknown `/api/...` paths with the app's `index.html` instead of a 404. Make sure `server/plugin-terrain-data-downloader.ts` is in `api/stateless/routes/` and the **API image was rebuilt and restarted**. If it says *CloudTAK system administrators only*, the signed-in account is not a system admin.
 
 ### Catalog entry
 ```json
