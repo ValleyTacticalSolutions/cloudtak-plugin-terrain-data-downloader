@@ -11,7 +11,7 @@ A CloudTAK plugin that downloads public elevation data and OpenStreetMap line da
 | Source | [AWS Open Data Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) (Terrarium PNG, built from USGS 3DEP, NASA SRTM, GMTED2010 and ETOPO1) | [BBBike](https://data.bbbike.org/osm/region/north-america/us/) weekly per-state OSM extracts (PMTiles, Shortbread schema) |
 | Processing | Fetches every tile covering the state boundary from z0 up to the detail level you pick | Keeps only LineStrings in the [categories you select](#snapping-categories), merged from the relevant Shortbread layers. Everything else (buildings, labels, unselected lines) is dropped, because the snapper grabs every line left in the layer |
 | Stored as | One `raster-dem` PMTiles archive (Terrarium encoding) | One vector PMTiles archive with a single `out` layer (CloudTAK's own import layer name, so the default vector style renders it). Each line keeps its OSM attributes plus a `category` field |
-| Registered as | Server overlay, type `raster-dem`, encoding `terrarium` | Server overlay, type `vector`, `snapping_enabled: true`, `snapping_layer: out` |
+| Registered as | One permanent server overlay, type `raster-dem`, encoding `terrarium`, set as CloudTAK's default terrain | One permanent server overlay, type `vector`, `snapping_enabled: true`, `snapping_layer: out`, no collection, preselected in every user's line tool |
 
 ### Snapping categories
 
@@ -42,29 +42,47 @@ These choices come from reading CloudTAK's source rather than guessing:
 - **Snapping only works on hosted PMTiles.** `POST /api/basemap` rejects snapping unless the URL is on CloudTAK's PMTiles server (`config.PMTILES_URL`). The line tool also requests `…/tiles/{z}/{x}/{y}/features?type=LineString` at the layer's maxzoom (`app/src/stores/modules/draw.ts`). That route shape only exists for **Hosted Tilesets** (`public/` in the asset bucket), so both outputs are written there.
 - **The download runs server side.** BBBike sends no CORS headers. CloudTAK's Plugin Proxy caps responses at 1 MB / 15 s and does not forward `Range`. State extracts run to hundreds of MB, so the plugin's API route streams them straight from the source into CloudTAK's bucket and nothing large passes through the browser.
 
-### Multiple states
+### Master layers: one terrain layer, one snapping layer
 
-- **Terrain is always combined into one archive.** CloudTAK applies a single active terrain at a time (`app/src/base/overlay-class.ts`), so one combined layer is the only arrangement that works seamlessly across state lines. Shared border tiles are fetched once.
-- **Snapping is combined by default**, with a toggle to keep states separate. CloudTAK's line tool snaps to one chosen layer at a time, so a combined layer lets a route cross a state line. Border tiles present in both extracts are merged at the vector-tile level and duplicate features are removed. Keep them separate if you expect to replace one state's data independently.
+Everything you download ends up in exactly **one terrain layer and one snapping layer**, however many states and batches you add.
+
+- Each master is a CloudTAK basemap that **keeps the same id forever**. A job builds a new data file, repoints the basemap at it (`PATCH /api/basemap/:id`), and deletes the old file. Users' overlays reference the basemap id (`/api/basemap/:id/tiles`), so everyone follows each update and the defaults never have to change.
+- The terrain master is always CloudTAK's **Default Terrain** (`map::terrain`). The snapping master is always the **default snapping layer**.
+- CloudTAK uses one active terrain at a time and snaps to one layer at a time, so a single layer per type is what works seamlessly across state lines.
+- Registration, defaults and cleanup happen on the server, through CloudTAK's own `/api/basemap` and `/api/config` endpoints, as the admin who started the job. A job finishes correctly even if the page is closed.
+
+| Scenario | Terrain master | Snapping master |
+|---|---|---|
+| New states (any batch) | Added. Tiles already in the layer are reused; only the new areas are downloaded | Added. The new states' OSM extracts are downloaded |
+| A state downloaded again | Nothing to do (terrain source data is static) | That state's latest weekly OSM extract is downloaded and replaces its data |
+| Detail level changed | Every state rebuilt at the new level, reusing overlapping tiles | Untouched |
+| Snapping categories changed | Untouched | Rebuilt from cached per-state data (all 12 categories are kept in the cache), **no re-download** |
+| States removed (**Remove**) | Rebuilt without them | Rebuilt without them, their cache deleted |
+| Last state removed | Layer deleted, default terrain cleared | Layer deleted, default snapping cleared |
+| Several jobs queued | Jobs run one at a time, each on top of the previous result | Same |
+| Job cancelled or failed | The previous layer stays live | Same |
+| Layers from plugin v1.0–1.2 | States read from the old file names and merged in; old layers deleted | Same |
+
+Border tiles shared by neighbouring states are merged at the vector-tile level and duplicate features removed. State lists, detail level and categories are stored in `plugins/terrain-data-downloader/settings.json` in the asset bucket, and per-state snapping caches in `plugins/terrain-data-downloader/cache/`.
 
 ## How to use
 
 1. Open **Menu → Terrain Data Downloader** (CloudTAK system administrators only, see [Admin only](#admin-only)).
-2. Tick one or more states (filter box, All/None buttons).
-3. Switch on **Download Terrain** (pick a detail level) and/or **Download Snapping**. The snapping card shows the included categories as one line; **Customize** opens the checklist (Defaults / All / None). With several states, choose whether to combine them. Sections stay collapsed until you need them.
-   **Make this the CloudTAK default terrain** is ticked by default and applies as soon as the terrain is registered. Untick it to keep your current default.
-4. Check the estimate, then press **Download**. Progress and a log are shown. You can leave the page; the job keeps running on the server and the page resumes it when reopened.
-5. When the job finishes, the layers are registered automatically in the **Terrain Data Downloader** overlay collection:
-   - Users add the terrain from **Overlays**. Snapping layers appear in the line tool's snapping list.
-   - The **star** on any imported layer makes it (or stops it being) the default. A filled star marks the current default.
-6. The trash icon removes the CloudTAK layer and its hosted tileset. A layer that is currently a default is un-set first.
+2. **In CloudTAK** at the top shows the current terrain and snapping layers: their states, detail level, categories, size and default status.
+3. Tick states to download. States already in a layer are marked with a mountain (terrain) or route (snapping) icon.
+4. Switch **Download Terrain** and/or **Download Snapping** on or off. The detail level and categories start from the current layers. Changing them shows a note when every state will be rebuilt. With no states ticked, **Apply changes** rebuilds the layers with the new detail or categories.
+5. The plan line says exactly what will happen ("Terrain: 6 states at High detail, ~120 MB to download"). Press **Download** or **Apply changes**. You can leave the page; the job keeps running on the server and the page resumes it when reopened.
+6. To take states out, tick them and press **Remove**.
+7. When a job finishes, the page updates your own map straight away (no reload needed). Other users get the new data the next time they load CloudTAK. Snapping layer changes show up the next time anyone starts drawing a line.
 
 ### Defaults
 
 | | How it works | Who gets it |
 |---|---|---|
-| Default terrain | Sets CloudTAK's own **Default Terrain** setting (`map::terrain`, also shown in Admin → Config → Map) | CloudTAK adds it as a hidden terrain overlay for new users and for existing users who have no terrain overlay yet. Users who already chose another terrain keep theirs |
-| Default snapping layer | CloudTAK has no default-snapping setting (the line tool always opens on "No Snapping"). The plugin stores the choice (`plugins/terrain-data-downloader/settings.json` in the asset bucket) and, for every user, preselects that layer each time the line tool starts | All users with the plugin loaded. They can still pick another layer or "No Snapping" while drawing |
+| Default terrain | The terrain master is always CloudTAK's own **Default Terrain** (`map::terrain`, also shown in Admin → Config → Map) | CloudTAK adds it as a terrain overlay for new users and for existing users who have no terrain overlay yet. Users who already chose another terrain keep theirs. Because the master keeps its id, users who have it get every update |
+| Default snapping layer | CloudTAK has no default-snapping setting (the line tool always opens on "No Snapping"). The snapping master is stored as the default, and the plugin preselects it for every user each time the line tool starts | All users with the plugin loaded. They can still pick another layer or "No Snapping" while drawing |
+
+The snapping master is created **without a collection**. CloudTAK's line tool lists snapping layers with a query that only matches basemaps whose `collection` is empty, so a snapping layer inside a collection never appears in the dropdown.
 
 ### Admin only
 
@@ -89,7 +107,7 @@ A single job is limited to 250,000 terrain tiles. Large states such as Alaska ne
 
 1. **CloudTAK API image rebuild.** The plugin adds an API route (`server/plugin-terrain-data-downloader.ts` → `api/stateless/routes/`). TAK Portal copies it and rebuilds on install. Manual installs must rebuild the API image too.
 2. **Outbound HTTPS from the CloudTAK API container** to `data.bbbike.org` (state boundaries and OSM extracts) and `s3.amazonaws.com` (Terrain Tiles). No browser CSP change is needed, because the browser only talks to CloudTAK's own API. **No Plugin Proxy configuration is needed.**
-3. **Temporary disk space in the API container.** Jobs work in the OS temp directory (`/tmp` in the container). Allow roughly 3× the largest selected state's OSM extract plus the terrain output: about 5 GB for California, and under 100 MB for small states.
+3. **Temporary disk space in the API container.** Jobs work in the OS temp directory (`/tmp` in the container). A snapping rebuild stages every state's cached data plus one fresh OSM extract; a terrain rebuild stages the current and new terrain files. Allow roughly 2× the size of both master layers plus 3× the largest state extract being downloaded (about 5 GB for California).
 4. **Single API instance.** Job status is kept in memory on the API process that started the job. That is the standard single-container docker-compose deployment. Behind a load balancer with several API tasks, progress polling can land on a different task. Finished files are still written to the bucket and listed under **Admin → Hosted Tilesets**.
 5. After install: **Settings → Refresh App** in CloudTAK (a normal browser refresh is not enough).
 
@@ -157,11 +175,12 @@ The web half uses these CloudTAK internals. Check them on CloudTAK upgrades:
 - `../../plugin.ts` (`PluginAPI`, `PluginInstance`): `routes.add`, `menu.add/remove`, `profile.get('system_admin')`, `pinia`
 - `../../src/components/CloudTAK/util/MenuTemplate.vue`
 - `../../../src/std.ts` (`std`)
-- `../../../src/stores/map.ts` (`useMapStore`): `draw.mode`, `draw.snappingOptions`, `draw.snappingLayer`, `draw.route.definitions`, used to preselect the default snapping layer
+- `../../../src/stores/map.ts` (`useMapStore`): `draw.mode`, `draw.snappingOptions`, `draw.snappingLayer`, `draw.route.definitions` (default snapping preselect) and `reconcileOverlays()` (live terrain refresh)
+- `../../../src/base/overlay.ts` (`OverlayManager`): `sync`, `loaded`, `loadedByMode`, `createLoaded`, `deleteLoaded`, overlay `update({ visible })`, used to show the rebuilt terrain without a reload
 
-CloudTAK HTTP endpoints called from the browser: `GET /api/config/tiles`, `GET/PUT /api/config` (`map::terrain`), `GET/POST/DELETE /api/basemap`.
+The browser only calls this plugin's own API routes.
 
-The server half uses `../../common/auth.js` (`Auth.as_user(..., { admin: true })`), `../../common/aws/s3.js` (`S3.put`, `S3.get`, `S3.exists`, `S3.del`), `config.models.Basemap` (`from`, `list`) and `../config.js` (type only).
+The server half uses `../../common/auth.js` (`Auth.as_user(..., { admin: true })`), `../../common/aws/s3.js` (`S3.put`, `S3.get`, `S3.exists`, `S3.del`), `config.models.Basemap.list` (finding layers from earlier plugin versions), `config.models.Setting.typed('map::terrain')`, `config.SigningSecret` / `API_URL` / `PMTILES_URL`, and `jsonwebtoken`. It registers layers by calling CloudTAK's own `POST/PATCH/DELETE /api/basemap` and `PUT /api/config` with a server-minted admin token for the job's user, the same way CloudTAK's import worker calls the API.
 
 ## Plugin API routes
 
@@ -171,12 +190,12 @@ All routes require a CloudTAK system administrator, except `GET /settings` (any 
 |---|---|---|
 | GET | `/api/plugin/terrain-data-downloader/states` | State list |
 | GET | `/api/plugin/terrain-data-downloader/categories` | Snapping categories |
-| GET / PUT | `/api/plugin/terrain-data-downloader/settings` | Default snapping layer (`{ "snapping": <basemap id> \| null }`) |
-| POST | `/api/plugin/terrain-data-downloader/plan` | Tile count / download size estimate |
-| POST | `/api/plugin/terrain-data-downloader/job` | Queue a job (one runs at a time) |
+| GET | `/api/plugin/terrain-data-downloader/settings` | Default snapping layer (`{ "snapping": <basemap id> \| null }`), readable by every user |
+| GET | `/api/plugin/terrain-data-downloader/status` | Master layers, defaults, layers from earlier versions |
+| POST | `/api/plugin/terrain-data-downloader/plan` | What a request would change, with download estimates |
+| POST | `/api/plugin/terrain-data-downloader/job` | Queue a change: `{ add, remove, terrain: { enabled, maxzoom }, snapping: { enabled, categories } }` (one job runs at a time) |
 | GET | `/api/plugin/terrain-data-downloader/job[/:id]` | Job status / recent jobs |
 | DELETE | `/api/plugin/terrain-data-downloader/job/:id` | Cancel |
-| DELETE | `/api/plugin/terrain-data-downloader/file/:name` | Delete a `tdd-*` hosted tileset |
 
 ## Development
 

@@ -28,6 +28,7 @@ import { setImmediate as yieldLoop } from 'node:timers/promises';
 import { Type, type Static } from '@sinclair/typebox';
 import Schema from '@openaddresses/batch-schema';
 import Err from '@openaddresses/batch-error';
+import jwt from 'jsonwebtoken';
 import Auth from '../../common/auth.js';
 import S3 from '../../common/aws/s3.js';
 import { sql } from 'drizzle-orm';
@@ -206,38 +207,53 @@ const STATE_BY_SLUG = new Map(STATES.map((s) => [s.slug, s]));
 // ---------------------------------------------------------------------------
 
 const JobRequest = Type.Object({
-    states: Type.Array(Type.String(), { minItems: 1, maxItems: STATES.length }),
+    add: Type.Array(Type.String(), { maxItems: STATES.length, description: 'States to add to the master layers, or re-download if already present' }),
+    remove: Type.Array(Type.String(), { maxItems: STATES.length, description: 'States to remove from both master layers' }),
     terrain: Type.Object({
-        enabled: Type.Boolean(),
+        enabled: Type.Boolean({ description: 'Apply "add" and the detail level to the terrain master layer' }),
         maxzoom: Type.Integer({ minimum: 10, maximum: 13, default: 12 }),
-        makeDefault: Type.Boolean({ default: false, description: 'Set as CloudTAK default terrain (map::terrain) once registered' }),
     }),
     snapping: Type.Object({
-        enabled: Type.Boolean(),
+        enabled: Type.Boolean({ description: 'Apply "add" and the categories to the snapping master layer' }),
         categories: Type.Array(Type.String(), { description: 'Snapping category ids, see GET /categories' }),
-        combine: Type.Boolean({ default: true, description: 'Merge all states into one snapping layer' }),
-        makeDefault: Type.Boolean({ default: false, description: 'Preselect in every user\'s line tool once registered' }),
     }),
 });
-
-const Settings = Type.Object({
-    snapping: Type.Union([Type.Null(), Type.Integer()], { description: 'Basemap id preselected in every user\'s line tool' }),
-});
-type SettingsT = Static<typeof Settings>;
 type JobRequestT = Static<typeof JobRequest>;
 
-const ResultSchema = Type.Object({
-    kind: Type.String({ enum: ['terrain', 'snapping'] }),
-    file: Type.String({ description: 'Hosted tileset name without .pmtiles' }),
-    label: Type.String(),
+const MasterTerrain = Type.Object({
+    basemap: Type.Union([Type.Null(), Type.Integer()]),
+    file: Type.String(),
     states: Type.Array(Type.String()),
-    minzoom: Type.Integer(),
     maxzoom: Type.Integer(),
-    bounds: Type.Array(Type.Number()),
     bytes: Type.Integer(),
-    tiles: Type.Integer(),
-    attribution: Type.String(),
+    updated: Type.String(),
 });
+
+const MasterSnap = Type.Object({
+    basemap: Type.Union([Type.Null(), Type.Integer()]),
+    file: Type.String(),
+    states: Type.Array(Type.String()),
+    categories: Type.Array(Type.String()),
+    bytes: Type.Integer(),
+    updated: Type.String(),
+});
+
+/** Persistent plugin state: the two master layers and the default snapping layer */
+const Settings = Type.Object({
+    snapping: Type.Union([Type.Null(), Type.Integer()], { description: 'Basemap id preselected in every user\'s line tool' }),
+    terrain: Type.Union([Type.Null(), MasterTerrain]),
+    snap: Type.Union([Type.Null(), MasterSnap]),
+});
+type SettingsT = Static<typeof Settings>;
+
+const LegacyLayer = Type.Object({
+    id: Type.Integer(),
+    name: Type.String(),
+    type: Type.String(),
+    file: Type.String(),
+    states: Type.Array(Type.String()),
+});
+type LegacyLayerT = Static<typeof LegacyLayer>;
 
 const JobSchema = Type.Object({
     id: Type.String(),
@@ -249,7 +265,7 @@ const JobSchema = Type.Object({
     step: Type.String(),
     progress: Type.Number(),
     log: Type.Array(Type.String()),
-    results: Type.Array(ResultSchema),
+    summary: Type.Array(Type.String()),
     error: Type.Optional(Type.String()),
 });
 type JobT = Static<typeof JobSchema>;
@@ -806,8 +822,11 @@ function filterSnapTile(mvt: Buffer, categories: Set<string>): Buffer | null {
     return builder.finish();
 }
 
-/** Merge several single-layer `out` tiles (adjacent states share border tiles) */
-function mergeOutTiles(tiles: Buffer[]): Buffer {
+/**
+ * Merge single-layer `out` tiles (adjacent states share border tiles), optionally keeping only
+ * features whose `category` is in `categories`. Returns null when nothing is left.
+ */
+function mergeOutTiles(tiles: Buffer[], categories?: Set<string>): Buffer | null {
     const builder = new LayerBuilder();
     for (const tile of tiles) {
         const r = new PbfReader(tile);
@@ -826,11 +845,12 @@ function mergeOutTiles(tiles: Buffer[]): Buffer {
                         if (typeof s === 'string') category = s;
                     }
                 }
+                if (categories && (!category || !categories.has(category))) continue;
                 builder.add(layer, feat, category);
             }
         }
     }
-    return builder.finish() ?? encodeLayer(builder.layer);
+    return builder.finish();
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,12 +1058,219 @@ async function downloadZipEntry(url: string, suffix: string, dest: string, onPro
 }
 
 // ---------------------------------------------------------------------------
+// Persistent plugin state (asset bucket, outside public/ so it is never served as a tileset)
+// ---------------------------------------------------------------------------
+
+const SNAP_CACHE_PREFIX = 'plugins/terrain-data-downloader/cache';
+const ALL_CATEGORIES = new Set(SNAP_CATEGORIES.map((c) => c.id));
+const DEFAULT_CATEGORIES = SNAP_CATEGORIES.filter((c) => c.default).map((c) => c.id);
+
+function snapCacheKey(slug: string): string {
+    return `${SNAP_CACHE_PREFIX}/snap-${slug}.pmtiles`;
+}
+
+let settingsCache: { at: number; value: SettingsT } | null = null;
+
+function emptySettings(): SettingsT {
+    return { snapping: null, terrain: null, snap: null };
+}
+
+async function readSettings(fresh = false): Promise<SettingsT> {
+    if (!fresh && settingsCache && Date.now() - settingsCache.at < 30_000) return settingsCache.value;
+    let value = emptySettings();
+    try {
+        if (await S3.exists(SETTINGS_KEY)) {
+            const chunks: Buffer[] = [];
+            for await (const chunk of await S3.get(SETTINGS_KEY)) chunks.push(Buffer.from(chunk as Buffer));
+            const raw = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Partial<SettingsT>;
+            value = {
+                snapping: typeof raw.snapping === 'number' ? raw.snapping : null,
+                terrain: raw.terrain && typeof raw.terrain === 'object' ? raw.terrain : null,
+                snap: raw.snap && typeof raw.snap === 'object' ? raw.snap : null,
+            };
+        }
+    } catch (err) {
+        console.error('plugin-terrain-data-downloader: could not read settings', err);
+        if (fresh) throw new Error(`Could not read plugin state from the asset bucket: ${errMessage(err)}`, { cause: err });
+    }
+    settingsCache = { at: Date.now(), value };
+    return value;
+}
+
+async function writeSettings(value: SettingsT): Promise<void> {
+    await S3.put(SETTINGS_KEY, JSON.stringify(value));
+    settingsCache = { at: Date.now(), value };
+}
+
+// ---------------------------------------------------------------------------
+// CloudTAK API calls (as the admin who started the job, through CloudTAK's own validation)
+// ---------------------------------------------------------------------------
+
+let CFG: ConfigStateless | null = null;
+
+function cfg(): ConfigStateless {
+    if (!CFG) throw new Error('Terrain Data Downloader routes are not initialised');
+    return CFG;
+}
+
+class ApiError extends Error {
+    status: number;
+    constructor(message: string, status: number) { super(message); this.status = status; }
+}
+
+async function cloudtak<T>(username: string, method: string, pathname: string, body?: unknown): Promise<T> {
+    // Server-minted user tokens carry no session claim, the same way CloudTAK's import worker signs
+    const token = jwt.sign({ access: 'admin', email: username }, cfg().SigningSecret, { expiresIn: '1h' });
+    const bases = [`http://127.0.0.1:${process.env.PORT || '5001'}`, cfg().API_URL.replace(/\/+$/, '')];
+    let lastErr: unknown;
+
+    for (const base of bases) {
+        let res: Response;
+        try {
+            res = await fetch(base + pathname, {
+                method,
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+                },
+                body: body !== undefined ? JSON.stringify(body) : undefined,
+                signal: AbortSignal.timeout(60_000),
+            });
+        } catch (err) {
+            lastErr = err; // unreachable on this address - try the next one
+            continue;
+        }
+
+        const text = await res.text();
+        let json: unknown = null;
+        try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+        if (!res.ok) {
+            const msg = (json && typeof json === 'object' && 'message' in json) ? String((json as { message: unknown }).message) : text.slice(0, 200);
+            throw new ApiError(`CloudTAK ${method} ${pathname} failed (${res.status}): ${msg}`, res.status);
+        }
+        return json as T;
+    }
+
+    throw new Error(`Could not reach the CloudTAK API: ${errMessage(lastErr)}`);
+}
+
+function tileUrl(file: string, ext: string): string {
+    return `${cfg().PMTILES_URL.replace(/\/+$/, '')}/tiles/public/${file}/tiles/{z}/{x}/{y}.${ext}`;
+}
+
+/** PATCH the master basemap in place (keeps its id, so overlays and defaults follow), or create it */
+async function upsertBasemap(job: JobT, existing: number | null, body: Record<string, unknown>): Promise<number> {
+    if (existing !== null) {
+        try {
+            await cloudtak(job.username, 'PATCH', `/api/basemap/${existing}`, body);
+            return existing;
+        } catch (err) {
+            if (!(err instanceof ApiError) || err.status !== 404) throw err;
+            log(job, `Master basemap ${existing} no longer exists - creating a new one`);
+        }
+    }
+
+    const created = await cloudtak<{ id: number }>(job.username, 'POST', '/api/basemap', {
+        ...body,
+        scope: 'server',
+        protocol: 'zxy',
+        sharing_enabled: true,
+        hidden: false,
+        overlay: true,
+        tilesize: 256,
+    });
+    return created.id;
+}
+
+async function deleteBasemap(job: JobT, id: number): Promise<void> {
+    try {
+        await cloudtak(job.username, 'DELETE', `/api/basemap/${id}`);
+    } catch (err) {
+        if (!(err instanceof ApiError) || err.status !== 404) throw err;
+    }
+}
+
+async function currentDefaultTerrain(): Promise<number | null> {
+    try {
+        const setting = await cfg().models.Setting.typed('map::terrain', null);
+        const value: unknown = setting.value;
+        return value === null || value === undefined || value === '' ? null : Number(value);
+    } catch {
+        return null;
+    }
+}
+
+async function setDefaultTerrain(job: JobT, id: number | null): Promise<void> {
+    await cloudtak(job.username, 'PUT', '/api/config', { 'map::terrain': id });
+}
+
+async function deleteHostedFile(job: JobT, file: string | null | undefined): Promise<void> {
+    if (!file || !file.startsWith(FILE_PREFIX)) return;
+    try {
+        await S3.del(`public/${file}.pmtiles`);
+    } catch (err) {
+        log(job, `Could not delete old file ${file}: ${errMessage(err)}`);
+    }
+}
+
+async function downloadFromBucket(key: string, dest: string): Promise<void> {
+    await pipeline(await S3.get(key), fs.createWriteStream(dest));
+}
+
+// ---------------------------------------------------------------------------
+// Layers created by plugin versions before the master-layer design (v1.0-1.2)
+// ---------------------------------------------------------------------------
+
+function fileFromUrl(url: string): string | null {
+    const m = url.match(/\/tiles\/public\/(tdd-[A-Za-z0-9._-]+?)(?:\.pmtiles)?\/tiles\//);
+    return m ? m[1] : null;
+}
+
+/** Old file names carry the state abbreviations: tdd-terrain-z12-co-ut-20261120-2135, tdd-snap-tn-..., tdd-roads-... */
+function statesFromLegacyFile(file: string): string[] {
+    const m = file.match(/^tdd-(?:terrain-z\d+|snap|roads)-(.+)-\d{8}-\d{4}$/);
+    if (!m) return [];
+    return m[1].split('-')
+        .map((abbr) => STATES.find((st) => st.abbr.toLowerCase() === abbr)?.slug)
+        .filter((slug): slug is string => !!slug);
+}
+
+async function findLegacy(s: SettingsT): Promise<LegacyLayerT[]> {
+    const keep = new Set([s.terrain?.basemap, s.snap?.basemap].filter((id): id is number => typeof id === 'number'));
+    const res = await cfg().models.Basemap.list({
+        limit: 500,
+        where: sql`url LIKE ${'%/tiles/public/' + FILE_PREFIX + '%'}`,
+    });
+    return res.items
+        .filter((b) => !keep.has(b.id))
+        .map((b) => {
+            const file = fileFromUrl(b.url) ?? '';
+            return { id: b.id, name: b.name, type: b.type, file, states: statesFromLegacyFile(file) };
+        });
+}
+
+async function retireLegacy(job: JobT, layers: LegacyLayerT[]): Promise<void> {
+    const defaultTerrain = await currentDefaultTerrain();
+    for (const layer of layers) {
+        try {
+            if (defaultTerrain === layer.id) await setDefaultTerrain(job, null);
+            await deleteBasemap(job, layer.id);
+            await deleteHostedFile(job, layer.file);
+            log(job, `Merged and removed old layer "${layer.name}"`);
+        } catch (err) {
+            log(job, `Could not remove old layer "${layer.name}": ${errMessage(err)}`);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Jobs
 // ---------------------------------------------------------------------------
 
 const jobs = new Map<string, JobT>();
 const cancelFlags = new Set<string>();
 let queue: Promise<void> = Promise.resolve();
+let runningJob: string | null = null;
 
 function now(): string { return new Date().toISOString(); }
 
@@ -1066,69 +1293,160 @@ function checkCancel(job: JobT): void {
 function stamp(): string {
     const d = new Date();
     const p = (n: number): string => String(n).padStart(2, '0');
-    return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}`;
-}
-
-function fileTag(states: StateDef[]): string {
-    return states.length > 6 ? `${states.length}states` : states.map((s) => s.abbr.toLowerCase()).join('-');
+    const rand = crypto.randomBytes(2).toString('hex');
+    return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}-${rand}`;
 }
 
 function snapCategoryLabel(ids: string[]): string {
     const labels = SNAP_CATEGORIES.filter((c) => ids.includes(c.id)).map((c) => c.label);
+    if (labels.length === SNAP_CATEGORIES.length) return 'all categories';
     return labels.length > 3 ? `${labels.length} categories` : labels.join(', ');
 }
 
 function stateLabel(states: StateDef[]): string {
-    return states.length > 4 ? `${states.length} states (${states.map((s) => s.abbr).join(', ')})` : states.map((s) => s.name).join(', ');
+    return states.length > 4 ? `${states.length} states` : states.map((s) => s.name).join(', ');
 }
 
-async function upload(job: JobT, localFile: string, name: string): Promise<void> {
-    log(job, `Uploading ${name}.pmtiles to hosted tilesets`);
-    await S3.put(`public/${name}.pmtiles`, fs.createReadStream(localFile));
+function defs(slugs: Iterable<string>): StateDef[] {
+    const set = new Set(slugs);
+    return STATES.filter((st) => set.has(st.slug)); // stable, alphabetical order
 }
 
-async function runTerrain(job: JobT, states: StateDef[], tmp: string, span: [number, number]): Promise<void> {
-    const maxzoom = job.request.terrain.maxzoom;
-    setStep(job, 'Planning terrain tiles', span[0]);
-    const plan = await planTerrain(states, maxzoom);
-    if (plan.tiles.length > MAX_TERRAIN_TILES) {
-        throw new Error(`Terrain request is ${plan.tiles.length.toLocaleString()} tiles (limit ${MAX_TERRAIN_TILES.toLocaleString()}) - choose a lower detail level or fewer states`);
+function sameSet(a: Iterable<string>, b: Iterable<string>): boolean {
+    const x = new Set(a); const y = new Set(b);
+    return x.size === y.size && [...x].every((v) => y.has(v));
+}
+
+/** Desired state of each master layer after applying a request to the current state */
+interface Target {
+    terrain: { touched: boolean; states: string[]; maxzoom: number; legacy: LegacyLayerT[] };
+    snap: { touched: boolean; states: string[]; categories: string[]; legacy: LegacyLayerT[]; refresh: Set<string> };
+}
+
+function target(req: JobRequestT, s: SettingsT, legacy: LegacyLayerT[]): Target {
+    const remove = new Set(req.remove);
+
+    const tLegacy = legacy.filter((l) => l.type === 'raster-dem');
+    const tBase = new Set([...(s.terrain?.states ?? []), ...tLegacy.flatMap((l) => l.states)]);
+    const tNext = new Set(tBase);
+    if (req.terrain.enabled) for (const a of req.add) tNext.add(a);
+    for (const r of remove) tNext.delete(r);
+    const tZoom = req.terrain.enabled ? req.terrain.maxzoom : (s.terrain?.maxzoom ?? req.terrain.maxzoom);
+    const tTouched = tLegacy.length > 0 && (req.terrain.enabled || req.remove.some((r) => tBase.has(r)))
+        || !sameSet(tNext, s.terrain?.states ?? [])
+        || (!!s.terrain && tZoom !== s.terrain.maxzoom);
+
+    const sLegacy = legacy.filter((l) => l.type === 'vector');
+    const sBase = new Set([...(s.snap?.states ?? []), ...sLegacy.flatMap((l) => l.states)]);
+    const sNext = new Set(sBase);
+    if (req.snapping.enabled) for (const a of req.add) sNext.add(a);
+    for (const r of remove) sNext.delete(r);
+    const sCats = req.snapping.enabled ? req.snapping.categories : (s.snap?.categories ?? DEFAULT_CATEGORIES);
+    // Re-requesting a state that is already in the layer means "download its latest OSM data again"
+    const refresh = new Set(req.snapping.enabled ? req.add.filter((a) => sBase.has(a)) : []);
+    const sTouched = sLegacy.length > 0 && (req.snapping.enabled || req.remove.some((r) => sBase.has(r)))
+        || !sameSet(sNext, s.snap?.states ?? [])
+        || (!!s.snap && !sameSet(sCats, s.snap.categories))
+        || refresh.size > 0;
+
+    return {
+        terrain: { touched: tTouched, states: [...tNext], maxzoom: tZoom, legacy: tLegacy },
+        snap: { touched: sTouched, states: [...sNext], categories: SNAP_CATEGORIES.filter((c) => sCats.includes(c.id)).map((c) => c.id), legacy: sLegacy, refresh },
+    };
+}
+
+// ----- Terrain master ------------------------------------------------------
+
+async function buildTerrain(job: JobT, s: SettingsT, t: Target['terrain'], tmp: string, span: [number, number]): Promise<void> {
+    const old = s.terrain;
+    const states = defs(t.states);
+
+    if (!states.length) {
+        setStep(job, 'Removing terrain layer', span[0]);
+        if (old?.basemap) {
+            if (await currentDefaultTerrain() === old.basemap) await setDefaultTerrain(job, null);
+            await deleteBasemap(job, old.basemap);
+        }
+        await deleteHostedFile(job, old?.file);
+        s.terrain = null;
+        await writeSettings(s);
+        await retireLegacy(job, t.legacy);
+        job.summary.push('Terrain layer removed (no states left)');
+        log(job, 'Terrain: no states left - layer removed');
+        return;
     }
-    log(job, `Terrain: ${plan.tiles.length.toLocaleString()} tiles, z${TERRAIN_MIN_ZOOM}-${maxzoom}, combined into one archive`);
+
+    setStep(job, 'Planning terrain tiles', span[0]);
+    const plan = await planTerrain(states, t.maxzoom);
+    if (plan.tiles.length > MAX_TERRAIN_TILES) {
+        throw new Error(`The terrain layer would be ${plan.tiles.length.toLocaleString()} tiles (limit ${MAX_TERRAIN_TILES.toLocaleString()}) for ${states.length} states - choose a lower detail level`);
+    }
+    log(job, `Terrain: ${states.length} state(s) at z${t.maxzoom}, ${plan.tiles.length.toLocaleString()} tiles`);
+
+    // Reuse every tile the current master already holds - only new areas are fetched
+    const reuse = new Map<number, { offset: number; length: number }>();
+    let oldFh: fsp.FileHandle | null = null;
+    let oldDataOffset = 0;
+    if (old?.file) {
+        const oldLocal = path.join(tmp, 'terrain-old.pmtiles');
+        try {
+            setStep(job, 'Reading current terrain layer', span[0]);
+            await downloadFromBucket(`public/${old.file}.pmtiles`, oldLocal);
+            oldFh = await fsp.open(oldLocal, 'r');
+            const h = decodeHeader(await readAt(oldFh, 0, PM_HEADER_LEN));
+            oldDataOffset = h.dataOffset;
+            for await (const e of pmtilesEntries(oldFh, h)) {
+                for (let i = 0; i < e.runLength; i++) reuse.set(e.tileId + i, { offset: e.offset, length: e.length });
+            }
+        } catch (err) {
+            log(job, `Terrain: could not read the current layer (${errMessage(err)}) - fetching all tiles`);
+            reuse.clear();
+            if (oldFh) { await oldFh.close(); oldFh = null; }
+        }
+    }
 
     const writer = await TileWriter.open(path.join(tmp, 'terrain.data'));
     let next = 0;
     let done = 0;
+    let reused = 0;
+    let fetched = 0;
     let missing = 0;
 
     const worker = async (): Promise<void> => {
         while (next < plan.tiles.length) {
             checkCancel(job);
-            const t = plan.tiles[next++];
-            const res = await fetchRetry(`${TERRAIN_URL}/${t.z}/${t.x}/${t.y}.png`, {}, { allow404: true, timeout: 30_000 });
-            if (res.ok) await writer.add(t.id, Buffer.from(await res.arrayBuffer()));
-            else { missing++; await res.body?.cancel().catch(() => undefined); }
+            const tile = plan.tiles[next++];
+            const have = reuse.get(tile.id);
+            if (have && oldFh) {
+                await writer.add(tile.id, await readAt(oldFh, oldDataOffset + have.offset, have.length));
+                reused++;
+            } else {
+                const res = await fetchRetry(`${TERRAIN_URL}/${tile.z}/${tile.x}/${tile.y}.png`, {}, { allow404: true, timeout: 30_000 });
+                if (res.ok) { await writer.add(tile.id, Buffer.from(await res.arrayBuffer())); fetched++; }
+                else { missing++; await res.body?.cancel().catch(() => undefined); }
+            }
             done++;
-            if (done % 200 === 0) setStep(job, `Downloading terrain ${done.toLocaleString()} / ${plan.tiles.length.toLocaleString()}`, span[0] + (span[1] - span[0]) * 0.9 * done / plan.tiles.length);
+            if (done % 200 === 0) setStep(job, `Terrain tiles ${done.toLocaleString()} / ${plan.tiles.length.toLocaleString()}`, span[0] + (span[1] - span[0]) * 0.85 * done / plan.tiles.length);
         }
     };
     try {
         await Promise.all(Array.from({ length: TERRAIN_CONCURRENCY }, () => worker()));
     } finally {
         await writer.close();
+        if (oldFh) await oldFh.close();
     }
-    if (missing) log(job, `Terrain: ${missing} tiles had no source data (skipped)`);
+    log(job, `Terrain: reused ${reused.toLocaleString()} tiles, downloaded ${fetched.toLocaleString()}${missing ? `, ${missing} without source data` : ''}`);
 
-    const name = `${FILE_PREFIX}terrain-z${maxzoom}-${fileTag(states)}-${stamp()}`;
-    const out = path.join(tmp, `${name}.pmtiles`);
-    setStep(job, 'Writing terrain PMTiles', span[0] + (span[1] - span[0]) * 0.92);
+    const file = `${FILE_PREFIX}terrain-${stamp()}`;
+    const out = path.join(tmp, `${file}.pmtiles`);
+    setStep(job, 'Writing terrain layer', span[0] + (span[1] - span[0]) * 0.88);
     const written = await writePMTiles({ file: writer.file, entries: writer.entries }, out, {
         tileType: PM_TILETYPE.png,
         tileCompression: PM_COMPRESSION.none,
         bounds: plan.bounds,
         metadata: {
             name: `Terrain ${stateLabel(states)}`,
-            description: 'Terrarium-encoded elevation tiles (raster-dem) generated by the CloudTAK Terrain Data Downloader plugin',
+            description: 'Terrarium-encoded elevation tiles (raster-dem) - Terrain Data Downloader master terrain layer',
             attribution: TERRAIN_ATTRIBUTION,
             type: 'baselayer',
             format: 'png',
@@ -1136,46 +1454,65 @@ async function runTerrain(job: JobT, states: StateDef[], tmp: string, span: [num
         },
     });
     await fsp.rm(writer.file, { force: true });
-    await upload(job, out, name);
+    setStep(job, 'Uploading terrain layer', span[0] + (span[1] - span[0]) * 0.92);
+    await S3.put(`public/${file}.pmtiles`, fs.createReadStream(out));
     await fsp.rm(out, { force: true });
 
-    job.results.push({
-        kind: 'terrain', file: name, label: `Terrain (z${maxzoom}) - ${stateLabel(states)}`,
-        states: states.map((s) => s.slug), minzoom: written.minZoom, maxzoom: written.maxZoom,
-        bounds: plan.bounds, bytes: written.bytes, tiles: writer.entries.length, attribution: TERRAIN_ATTRIBUTION,
+    setStep(job, 'Registering terrain layer in CloudTAK', span[0] + (span[1] - span[0]) * 0.97);
+    const id = await upsertBasemap(job, old?.basemap ?? null, {
+        name: `Terrain (z${t.maxzoom}) - ${stateLabel(states)}`.slice(0, 120),
+        url: tileUrl(file, 'png'),
+        type: 'raster-dem',
+        encoding: 'terrarium',
+        format: 'png',
+        minzoom: written.minZoom,
+        maxzoom: written.maxZoom,
+        bounds: plan.bounds,
+        attribution: TERRAIN_ATTRIBUTION,
+        collection: null,
     });
-    log(job, `Terrain: done (${(written.bytes / 1e6).toFixed(1)} MB)`);
+    await setDefaultTerrain(job, id);
+
+    s.terrain = { basemap: id, file, states: states.map((st) => st.slug), maxzoom: t.maxzoom, bytes: written.bytes, updated: now() };
+    await writeSettings(s);
+    if (old?.file && old.file !== file) await deleteHostedFile(job, old.file);
+    await retireLegacy(job, t.legacy);
+
+    job.summary.push(`Terrain: ${stateLabel(states)} at z${t.maxzoom} (${(written.bytes / 1e6).toFixed(0)} MB), set as the CloudTAK default terrain`);
+    log(job, `Terrain: master layer ${id} updated (${(written.bytes / 1e6).toFixed(1)} MB)`);
 }
 
-async function filterSnapState(job: JobT, state: StateDef, tmp: string, span: [number, number]): Promise<{ store: TileStore; bounds: [number, number, number, number] }> {
+// ----- Snapping master -----------------------------------------------------
+
+/** Download one state's OSM extract and keep every snapping category (the per-state cache) */
+async function buildSnapCache(job: JobT, state: StateDef, tmp: string, dest: string, span: [number, number]): Promise<number> {
     const url = `${BBBIKE_PMTILES}/${state.slug}/${state.slug}.osm.pmtiles-shortbread.zip`;
     const src = path.join(tmp, `${state.slug}-src.pmtiles`);
     const mid = span[0] + (span[1] - span[0]) * 0.5;
 
-    log(job, `Snapping: downloading OSM extract for ${state.name}`);
-    await downloadZipEntry(url, '.pmtiles', src, (d, t) => {
-        if (d % (8 * 1024 * 1024) < 65_536) setStep(job, `Downloading ${state.name} OSM extract ${(d / 1e6).toFixed(0)} / ${(t / 1e6).toFixed(0)} MB`, span[0] + (mid - span[0]) * d / t);
+    log(job, `Snapping: downloading the latest OSM extract for ${state.name}`);
+    await downloadZipEntry(url, '.pmtiles', src, (d, total) => {
+        if (d % (8 * 1024 * 1024) < 65_536) setStep(job, `Downloading ${state.name} OSM extract ${(d / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`, span[0] + (mid - span[0]) * d / total);
     }, () => cancelFlags.has(job.id));
 
-    const categories = new Set(job.request.snapping.categories);
     const fh = await fsp.open(src, 'r');
-    const writer = await TileWriter.open(path.join(tmp, `${state.slug}-snap.data`));
+    const writer = await TileWriter.open(path.join(tmp, `${state.slug}-cache.data`));
     try {
         const h = decodeHeader(await readAt(fh, 0, PM_HEADER_LEN));
         if (h.tileType !== PM_TILETYPE.mvt) throw new Error(`${state.name} extract is not a vector tileset`);
-
         let seen = 0;
         for await (const e of pmtilesEntries(fh, h)) {
             seen++;
             if (seen % 2000 === 0) {
                 checkCancel(job);
-                setStep(job, `Extracting roads/trails for ${state.name} (${(100 * seen / Math.max(1, h.tileEntries)).toFixed(0)}%)`, mid + (span[1] - mid) * seen / Math.max(1, h.tileEntries));
+                setStep(job, `Extracting snapping lines for ${state.name} (${(100 * seen / Math.max(1, h.tileEntries)).toFixed(0)}%)`, mid + (span[1] - mid) * seen / Math.max(1, h.tileEntries));
                 await yieldLoop();
             }
             const mvt = decompress(await readAt(fh, h.dataOffset + e.offset, e.length), h.tileCompression);
-            const filtered = filterSnapTile(mvt, categories);
+            const filtered = filterSnapTile(mvt, ALL_CATEGORIES);
             if (!filtered) continue;
-            for (let i = 0; i < e.runLength; i++) await writer.add(e.tileId + i, filtered);
+            const gz = zlib.gzipSync(filtered);
+            for (let i = 0; i < e.runLength; i++) await writer.add(e.tileId + i, gz);
         }
     } finally {
         await fh.close();
@@ -1183,115 +1520,192 @@ async function filterSnapState(job: JobT, state: StateDef, tmp: string, span: [n
     }
 
     const store = await writer.close();
-    log(job, `Snapping: ${state.name} has ${store.entries.length.toLocaleString()} tiles with snapping lines`);
-    return { store, bounds: boundsOf(await stateBoundary(state)) };
+    if (!store.entries.length) {
+        await fsp.rm(store.file, { force: true });
+        return 0;
+    }
+    const bounds = boundsOf(await stateBoundary(state));
+    await writePMTiles(store, dest, {
+        tileType: PM_TILETYPE.mvt,
+        tileCompression: PM_COMPRESSION.gzip,
+        bounds,
+        metadata: { name: `Snapping cache ${state.name}`, generator: 'cloudtak-plugin-terrain-data-downloader', categories: [...ALL_CATEGORIES] },
+    });
+    await fsp.rm(store.file, { force: true });
+    await S3.put(snapCacheKey(state.slug), fs.createReadStream(dest));
+    return store.entries.length;
 }
 
-async function writeSnap(job: JobT, states: StateDef[], stores: TileStore[], bounds: [number, number, number, number], tmp: string): Promise<void> {
-    const name = `${FILE_PREFIX}snap-${fileTag(states)}-${stamp()}`;
+async function buildSnap(job: JobT, s: SettingsT, t: Target['snap'], tmp: string, span: [number, number]): Promise<void> {
+    const old = s.snap;
+    const states = defs(t.states);
+    const removed = (old?.states ?? []).filter((slug) => !t.states.includes(slug));
 
-    // Merge tiles from every store; border tiles present in several states are combined
-    const byId = new Map<number, Array<{ store: TileStore; entry: PMEntry }>>();
-    for (const store of stores) for (const entry of store.entries) {
-        const list = byId.get(entry.tileId);
-        if (list) list.push({ store, entry }); else byId.set(entry.tileId, [{ store, entry }]);
+    for (const slug of [...removed, ...job.request.remove]) {
+        await S3.del(snapCacheKey(slug)).catch(() => undefined);
     }
 
-    const handles = new Map<TileStore, fsp.FileHandle>();
-    for (const s of stores) handles.set(s, await fsp.open(s.file, 'r'));
-    const writer = await TileWriter.open(path.join(tmp, `${name}.data`));
+    if (!states.length) {
+        setStep(job, 'Removing snapping layer', span[0]);
+        if (old?.basemap) await deleteBasemap(job, old.basemap);
+        await deleteHostedFile(job, old?.file);
+        s.snap = null;
+        s.snapping = null;
+        await writeSettings(s);
+        await retireLegacy(job, t.legacy);
+        job.summary.push('Snapping layer removed (no states left)');
+        log(job, 'Snapping: no states left - layer removed');
+        return;
+    }
+    if (!t.categories.length) throw new Error('Select at least one snapping category');
+
+    // 1. Make sure every state has a per-state cache (all categories); download new/refreshed states
+    const caches: Array<{ state: StateDef; file: string }> = [];
+    const per = (span[1] - span[0]) * 0.75 / states.length;
+    for (let i = 0; i < states.length; i++) {
+        checkCancel(job);
+        const st = states[i];
+        const file = path.join(tmp, `${st.slug}-cache.pmtiles`);
+        const sub: [number, number] = [span[0] + per * i, span[0] + per * (i + 1)];
+        const cached = !t.refresh.has(st.slug) && await S3.exists(snapCacheKey(st.slug)).catch(() => false);
+        if (cached) {
+            setStep(job, `Loading cached snapping data for ${st.name}`, sub[0]);
+            try {
+                await downloadFromBucket(snapCacheKey(st.slug), file);
+                caches.push({ state: st, file });
+                continue;
+            } catch (err) {
+                log(job, `Snapping: cache for ${st.name} unreadable (${errMessage(err)}) - downloading again`);
+            }
+        }
+        const tiles = await buildSnapCache(job, st, tmp, file, sub);
+        if (tiles) caches.push({ state: st, file });
+        else log(job, `Snapping: no snapping lines found for ${st.name}`);
+    }
+    if (!caches.length) throw new Error('No snapping lines were found for the selected states');
+
+    // 2. Merge every state's cache into one layer, keeping only the selected categories
+    setStep(job, 'Merging snapping layer', span[0] + (span[1] - span[0]) * 0.78);
+    const cats = new Set(t.categories);
+    const opened: Array<{ fh: fsp.FileHandle; h: PMHeader }> = [];
+    const byId = new Map<number, Array<{ src: number; offset: number; length: number }>>();
+    const writer = await TileWriter.open(path.join(tmp, 'snap.data'));
     try {
-        let i = 0;
+        for (let i = 0; i < caches.length; i++) {
+            const fh = await fsp.open(caches[i].file, 'r');
+            const h = decodeHeader(await readAt(fh, 0, PM_HEADER_LEN));
+            opened.push({ fh, h });
+            for await (const e of pmtilesEntries(fh, h)) {
+                for (let r = 0; r < e.runLength; r++) {
+                    const list = byId.get(e.tileId + r);
+                    const part = { src: i, offset: e.offset, length: e.length };
+                    if (list) list.push(part); else byId.set(e.tileId + r, [part]);
+                }
+            }
+        }
+
+        let n = 0;
         for (const id of Array.from(byId.keys()).sort((a, b) => a - b)) {
-            const parts = byId.get(id) ?? [];
             const bodies: Buffer[] = [];
-            for (const p of parts) bodies.push(await readAt(handles.get(p.store) as fsp.FileHandle, p.entry.offset, p.entry.length));
-            const mvt = bodies.length === 1 ? bodies[0] : mergeOutTiles(bodies);
-            await writer.add(id, zlib.gzipSync(mvt));
-            if (++i % 5000 === 0) { checkCancel(job); await yieldLoop(); }
+            for (const part of byId.get(id) ?? []) {
+                const o = opened[part.src];
+                bodies.push(decompress(await readAt(o.fh, o.h.dataOffset + part.offset, part.length), o.h.tileCompression));
+            }
+            const mvt = mergeOutTiles(bodies, cats);
+            if (mvt) await writer.add(id, zlib.gzipSync(mvt));
+            if (++n % 5000 === 0) { checkCancel(job); await yieldLoop(); }
         }
     } finally {
-        for (const fh of handles.values()) await fh.close();
+        for (const o of opened) await o.fh.close();
     }
     const store = await writer.close();
+    if (!store.entries.length) throw new Error('None of the selected snapping categories exist in these states');
 
-    const out = path.join(tmp, `${name}.pmtiles`);
+    const bounds = boundsOf((await Promise.all(caches.map((c) => stateBoundary(c.state)))).flat());
+
+    const file = `${FILE_PREFIX}snap-${stamp()}`;
+    const out = path.join(tmp, `${file}.pmtiles`);
     const written = await writePMTiles(store, out, {
         tileType: PM_TILETYPE.mvt,
         tileCompression: PM_COMPRESSION.gzip,
         bounds,
         metadata: {
             name: `Snapping ${stateLabel(states)}`,
-            description: `OSM lines for CloudTAK line snapping (${snapCategoryLabel(job.request.snapping.categories)}), generated by the Terrain Data Downloader plugin`,
+            description: `OSM lines for CloudTAK line snapping (${snapCategoryLabel(t.categories)}) - Terrain Data Downloader master snapping layer`,
             attribution: SNAP_ATTRIBUTION,
             type: 'overlay',
             format: 'pbf',
             vector_layers: [{
                 id: SNAP_LAYER_OUT,
                 description: 'Snapping lines from OSM Shortbread layers; `category` holds the snapping category id',
-                minzoom: 0,
+                minzoom: minZoomOf(store),
                 maxzoom: 14,
                 fields: { category: 'String', kind: 'String', surface: 'String', tracktype: 'String', bridge: 'Boolean', tunnel: 'Boolean', oneway: 'Boolean', link: 'Boolean', service: 'String', bicycle: 'String', horse: 'String' },
             }],
         },
     });
     await fsp.rm(store.file, { force: true });
-    await upload(job, out, name);
+    setStep(job, 'Uploading snapping layer', span[0] + (span[1] - span[0]) * 0.92);
+    await S3.put(`public/${file}.pmtiles`, fs.createReadStream(out));
     await fsp.rm(out, { force: true });
 
-    job.results.push({
-        kind: 'snapping', file: name, label: `Snapping (${snapCategoryLabel(job.request.snapping.categories)}) - ${stateLabel(states)}`,
-        states: states.map((s) => s.slug), minzoom: written.minZoom, maxzoom: written.maxZoom,
-        bounds, bytes: written.bytes, tiles: store.entries.length, attribution: SNAP_ATTRIBUTION,
+    setStep(job, 'Registering snapping layer in CloudTAK', span[0] + (span[1] - span[0]) * 0.97);
+    // collection must be null: the line tool's snapping list only returns basemaps without a collection
+    const id = await upsertBasemap(job, old?.basemap ?? null, {
+        name: `Snapping (${snapCategoryLabel(t.categories)}) - ${stateLabel(states)}`.slice(0, 120),
+        url: tileUrl(file, 'mvt'),
+        type: 'vector',
+        format: 'mvt',
+        minzoom: written.minZoom,
+        maxzoom: written.maxZoom,
+        bounds,
+        attribution: SNAP_ATTRIBUTION,
+        collection: null,
+        snapping_enabled: true,
+        snapping_layer: SNAP_LAYER_OUT,
     });
-    log(job, `Snapping: ${stateLabel(states)} done (${(written.bytes / 1e6).toFixed(1)} MB)`);
+
+    s.snap = { basemap: id, file, states: caches.map((c) => c.state.slug), categories: t.categories, bytes: written.bytes, updated: now() };
+    s.snapping = id;
+    await writeSettings(s);
+    if (old?.file && old.file !== file) await deleteHostedFile(job, old.file);
+    await retireLegacy(job, t.legacy);
+
+    job.summary.push(`Snapping: ${stateLabel(caches.map((c) => c.state))} with ${snapCategoryLabel(t.categories)} (${(written.bytes / 1e6).toFixed(0)} MB), preselected in every user's line tool`);
+    log(job, `Snapping: master layer ${id} updated (${(written.bytes / 1e6).toFixed(1)} MB)`);
 }
 
-async function runSnapping(job: JobT, states: StateDef[], tmp: string, span: [number, number]): Promise<void> {
-    const per = (span[1] - span[0]) / states.length;
-    const filtered: Array<{ state: StateDef; store: TileStore; bounds: [number, number, number, number] }> = [];
-
-    for (let i = 0; i < states.length; i++) {
-        checkCancel(job);
-        const r = await filterSnapState(job, states[i], tmp, [span[0] + per * i, span[0] + per * (i + 0.9)]);
-        if (!r.store.entries.length) { log(job, `Snapping: nothing in the selected categories for ${states[i].name}`); continue; }
-
-        if (job.request.snapping.combine && states.length > 1) {
-            filtered.push({ state: states[i], ...r });
-        } else {
-            setStep(job, `Writing snapping PMTiles for ${states[i].name}`, span[0] + per * (i + 0.95));
-            await writeSnap(job, [states[i]], [r.store], r.bounds, tmp);
-            await fsp.rm(r.store.file, { force: true });
-        }
-    }
-
-    if (filtered.length) {
-        setStep(job, 'Merging snapping layers', span[1] - per * 0.05);
-        const all = filtered.map((f) => f.state);
-        const b = filtered.map((f) => f.bounds);
-        const bounds: [number, number, number, number] = [
-            Math.min(...b.map((x) => x[0])), Math.min(...b.map((x) => x[1])),
-            Math.max(...b.map((x) => x[2])), Math.max(...b.map((x) => x[3])),
-        ];
-        await writeSnap(job, all, filtered.map((f) => f.store), bounds, tmp);
-        for (const f of filtered) await fsp.rm(f.store.file, { force: true });
-    }
+function minZoomOf(store: TileStore): number {
+    let min = 14;
+    for (const e of store.entries) min = Math.min(min, tileIdZoom(e.tileId));
+    return min;
 }
 
 async function runJob(job: JobT): Promise<void> {
     if (cancelFlags.has(job.id)) { job.status = 'cancelled'; return; }
     job.status = 'running';
+    runningJob = job.id;
     job.updated = now();
-
-    const states = job.request.states.map((s) => STATE_BY_SLUG.get(s) as StateDef);
     const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'cloudtak-tdd-'));
-    const doTerrain = job.request.terrain.enabled;
-    const doSnap = job.request.snapping.enabled;
-    const split = doTerrain && doSnap ? 0.5 : (doTerrain ? 1 : 0);
 
     try {
-        if (doTerrain) await runTerrain(job, states, tmp, [0, split]);
-        if (doSnap) await runSnapping(job, states, tmp, [split, 1]);
+        // Always start from the latest stored state, so queued batches stack onto each other
+        setStep(job, 'Reading current layers', 0);
+        const s = await readSettings(true);
+        const legacy = await findLegacy(s);
+        if (legacy.length) log(job, `Found ${legacy.length} layer(s) from an earlier plugin version - they will be merged into the master layers`);
+
+        const t = target(job.request, s, legacy);
+        if (!t.terrain.touched && !t.snap.touched) {
+            job.summary.push('Nothing to change - the layers already match this request');
+            log(job, 'Nothing to change');
+        }
+        const both = t.terrain.touched && t.snap.touched;
+        const split = both ? 0.4 : (t.terrain.touched ? 1 : 0);
+
+        if (t.terrain.touched) await buildTerrain(job, s, t.terrain, tmp, [0, split]);
+        if (t.snap.touched) await buildSnap(job, s, t.snap, tmp, [split, 1]);
+
         job.status = 'success';
         setStep(job, 'Complete', 1);
         log(job, 'Job complete');
@@ -1303,6 +1717,7 @@ async function runJob(job: JobT): Promise<void> {
         console.error(`plugin-terrain-data-downloader job ${job.id} ${job.status}:`, err);
     } finally {
         cancelFlags.delete(job.id);
+        runningJob = null;
         job.updated = now();
         await fsp.rm(tmp, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -1318,49 +1733,15 @@ function enqueue(job: JobT): void {
     queue = queue.then(() => runJob(job)).catch((err) => console.error('plugin-terrain-data-downloader queue error', err));
 }
 
-function validateRequest(body: JobRequestT): StateDef[] {
-    const states: StateDef[] = [];
-    for (const slug of new Set(body.states)) {
-        const s = STATE_BY_SLUG.get(slug);
-        if (!s) throw new Err(400, null, `Unknown state: ${slug}`);
-        states.push(s);
+function validateRequest(body: JobRequestT): void {
+    for (const slug of [...body.add, ...body.remove]) {
+        if (!STATE_BY_SLUG.has(slug)) throw new Err(400, null, `Unknown state: ${slug}`);
     }
-    if (!body.terrain.enabled && !body.snapping.enabled) throw new Err(400, null, 'Select terrain, snapping or both');
+    if (body.add.some((a) => body.remove.includes(a))) throw new Err(400, null, 'A state cannot be added and removed in the same request');
     if (!TERRAIN_ZOOMS.includes(body.terrain.maxzoom)) throw new Err(400, null, 'Unsupported terrain detail level');
-    if (body.snapping.enabled) {
-        if (!body.snapping.categories.length) throw new Err(400, null, 'Select at least one snapping category');
-        for (const c of body.snapping.categories) if (!SNAP_CATEGORY_IDS.has(c)) throw new Err(400, null, `Unknown snapping category: ${c}`);
-    }
-    return states;
-}
-
-// ---------------------------------------------------------------------------
-// Persistent plugin settings (asset bucket, outside public/ so it is never served as a tileset)
-// ---------------------------------------------------------------------------
-
-let settingsCache: { at: number; value: SettingsT } | null = null;
-
-async function readSettings(): Promise<SettingsT> {
-    if (settingsCache && Date.now() - settingsCache.at < 30_000) return settingsCache.value;
-    let value: SettingsT = { snapping: null };
-    try {
-        if (await S3.exists(SETTINGS_KEY)) {
-            const chunks: Buffer[] = [];
-            for await (const chunk of await S3.get(SETTINGS_KEY)) chunks.push(Buffer.from(chunk as Buffer));
-            const raw = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Partial<SettingsT>;
-            value = { snapping: typeof raw.snapping === 'number' ? raw.snapping : null };
-        }
-    } catch (err) {
-        console.error('plugin-terrain-data-downloader: could not read settings', err);
-    }
-    settingsCache = { at: Date.now(), value };
-    return value;
-}
-
-async function writeSettings(value: SettingsT): Promise<SettingsT> {
-    await S3.put(SETTINGS_KEY, JSON.stringify(value));
-    settingsCache = { at: Date.now(), value };
-    return value;
+    for (const c of body.snapping.categories) if (!SNAP_CATEGORY_IDS.has(c)) throw new Err(400, null, `Unknown snapping category: ${c}`);
+    if (body.snapping.enabled && !body.snapping.categories.length) throw new Err(400, null, 'Select at least one snapping category');
+    if (body.add.length && !body.terrain.enabled && !body.snapping.enabled) throw new Err(400, null, 'Turn on terrain, snapping or both to add states');
 }
 
 // ---------------------------------------------------------------------------
@@ -1368,6 +1749,8 @@ async function writeSettings(value: SettingsT): Promise<SettingsT> {
 // ---------------------------------------------------------------------------
 
 export default async function router(schema: Schema, config: ConfigStateless) {
+    CFG = config;
+
     await schema.get(`${PREFIX}/states`, {
         name: 'List States',
         group: 'PluginTerrainDataDownloader',
@@ -1388,7 +1771,7 @@ export default async function router(schema: Schema, config: ConfigStateless) {
     await schema.get(`${PREFIX}/categories`, {
         name: 'List Snapping Categories',
         group: 'PluginTerrainDataDownloader',
-        description: 'Line categories that can be included in a snapping layer',
+        description: 'Line categories that can be included in the snapping layer',
         res: Type.Object({
             total: Type.Integer(),
             items: Type.Array(Type.Object({ id: Type.String(), label: Type.String(), description: Type.String(), default: Type.Boolean() })),
@@ -1406,65 +1789,108 @@ export default async function router(schema: Schema, config: ConfigStateless) {
     await schema.get(`${PREFIX}/settings`, {
         name: 'Get Settings',
         group: 'PluginTerrainDataDownloader',
-        description: 'Plugin defaults. Readable by every user so each client can preselect the default snapping layer',
-        res: Settings,
+        description: 'The default snapping layer. Readable by every user so each client can preselect it in the line tool',
+        res: Type.Object({ snapping: Type.Union([Type.Null(), Type.Integer()]) }),
     }, async (req, res) => {
         try {
             await Auth.as_user(config, req);
-            res.json(await readSettings());
+            res.json({ snapping: (await readSettings()).snapping });
         } catch (err) {
             Err.respond(err, res);
         }
     });
 
-    await schema.put(`${PREFIX}/settings`, {
-        name: 'Update Settings',
+    await schema.get(`${PREFIX}/status`, {
+        name: 'Get Status',
         group: 'PluginTerrainDataDownloader',
-        description: 'Set the default snapping layer (basemap id, or null for none)',
-        body: Settings,
-        res: Settings,
+        description: 'The master terrain and snapping layers, defaults, and layers left by earlier plugin versions',
+        res: Type.Object({
+            terrain: Type.Union([Type.Null(), MasterTerrain]),
+            snapping: Type.Union([Type.Null(), MasterSnap]),
+            defaultTerrain: Type.Union([Type.Null(), Type.Integer()]),
+            defaultSnapping: Type.Union([Type.Null(), Type.Integer()]),
+            legacy: Type.Array(LegacyLayer),
+            running: Type.Union([Type.Null(), Type.String()]),
+            defaultCategories: Type.Array(Type.String()),
+        }),
     }, async (req, res) => {
         try {
             await Auth.as_user(config, req, { admin: true });
-            if (req.body.snapping !== null) {
-                const basemap = await config.models.Basemap.from(req.body.snapping);
-                const snap = await config.models.Basemap.list({ limit: 1, where: sql`id = ${req.body.snapping} AND id IN (SELECT basemap FROM basemaps_vector WHERE snapping_enabled = true)` });
-                if (basemap.username || !snap.items.length) throw new Err(400, null, 'Default snapping layer must be a server-scoped basemap with snapping enabled');
-            }
-            res.json(await writeSettings({ snapping: req.body.snapping }));
+            const s = await readSettings(true);
+            res.json({
+                terrain: s.terrain,
+                snapping: s.snap,
+                defaultTerrain: await currentDefaultTerrain(),
+                defaultSnapping: s.snapping,
+                legacy: await findLegacy(s),
+                running: runningJob,
+                defaultCategories: DEFAULT_CATEGORIES,
+            });
         } catch (err) {
             Err.respond(err, res);
         }
     });
 
     await schema.post(`${PREFIX}/plan`, {
-        name: 'Plan Download',
+        name: 'Plan Changes',
         group: 'PluginTerrainDataDownloader',
-        description: 'Estimate tile counts and sizes before starting a job',
+        description: 'Preview what a request would do to the master layers, with download estimates',
         body: JobRequest,
         res: Type.Object({
-            terrain: Type.Object({ tiles: Type.Integer(), bytes: Type.Integer(), limit: Type.Integer() }),
-            snapping: Type.Object({ download: Type.Integer(), states: Type.Array(Type.Object({ slug: Type.String(), download: Type.Integer() })) }),
+            terrain: Type.Object({
+                touched: Type.Boolean(),
+                states: Type.Integer(),
+                maxzoom: Type.Integer(),
+                tiles: Type.Integer(),
+                newTiles: Type.Integer(),
+                bytes: Type.Integer(),
+                limit: Type.Integer(),
+            }),
+            snapping: Type.Object({
+                touched: Type.Boolean(),
+                states: Type.Integer(),
+                downloads: Type.Array(Type.String()),
+                download: Type.Integer(),
+                categoriesChanged: Type.Boolean(),
+            }),
         }),
     }, async (req, res) => {
         try {
             await Auth.as_user(config, req, { admin: true });
-            const states = validateRequest(req.body);
+            validateRequest(req.body);
+            const s = await readSettings(true);
+            const legacy = await findLegacy(s);
+            const t = target(req.body, s, legacy);
 
             let tiles = 0;
-            if (req.body.terrain.enabled) tiles = (await planTerrain(states, req.body.terrain.maxzoom)).tiles.length;
-
-            const snap: Array<{ slug: string; download: number }> = [];
-            if (req.body.snapping.enabled) {
-                await Promise.all(states.map(async (s) => {
-                    const size = await remoteSize(`${BBBIKE_PMTILES}/${s.slug}/${s.slug}.osm.pmtiles-shortbread.zip`).catch(() => 0);
-                    snap.push({ slug: s.slug, download: size });
-                }));
+            let newTiles = 0;
+            if (t.terrain.touched && t.terrain.states.length) {
+                const next = await planTerrain(defs(t.terrain.states), t.terrain.maxzoom);
+                tiles = next.tiles.length;
+                newTiles = tiles;
+                if (s.terrain && s.terrain.states.length) {
+                    // Tiles already in the master (same areas, zooms it already has) are reused
+                    const have = await planTerrain(defs(s.terrain.states), Math.min(s.terrain.maxzoom, t.terrain.maxzoom));
+                    const ids = new Set(have.tiles.map((x) => x.id));
+                    newTiles = next.tiles.filter((x) => !ids.has(x.id)).length;
+                }
             }
 
+            const downloads: string[] = [];
+            if (t.snap.touched) {
+                for (const slug of t.snap.states) {
+                    const cached = !t.snap.refresh.has(slug) && await S3.exists(snapCacheKey(slug)).catch(() => false);
+                    if (!cached) downloads.push(slug);
+                }
+            }
+            let download = 0;
+            await Promise.all(downloads.map(async (slug) => {
+                download += await remoteSize(`${BBBIKE_PMTILES}/${slug}/${slug}.osm.pmtiles-shortbread.zip`).catch(() => 0);
+            }));
+
             res.json({
-                terrain: { tiles, bytes: tiles * TERRAIN_AVG_TILE_BYTES, limit: MAX_TERRAIN_TILES },
-                snapping: { download: snap.reduce((a, s) => a + s.download, 0), states: snap },
+                terrain: { touched: t.terrain.touched, states: t.terrain.states.length, maxzoom: t.terrain.maxzoom, tiles, newTiles, bytes: newTiles * TERRAIN_AVG_TILE_BYTES, limit: MAX_TERRAIN_TILES },
+                snapping: { touched: t.snap.touched, states: t.snap.states.length, downloads, download, categoriesChanged: !!s.snap && !sameSet(s.snap.categories, t.snap.categories) },
             });
         } catch (err) {
             Err.respond(err, res);
@@ -1474,26 +1900,29 @@ export default async function router(schema: Schema, config: ConfigStateless) {
     await schema.post(`${PREFIX}/job`, {
         name: 'Start Job',
         group: 'PluginTerrainDataDownloader',
-        description: 'Queue a terrain and/or snapping download; jobs run one at a time on this API instance',
+        description: 'Queue a change to the master layers; jobs run one at a time, each on top of the previous result',
         body: JobRequest,
         res: JobSchema,
     }, async (req, res) => {
         try {
             const user = await Auth.as_user(config, req, { admin: true });
-            const states = validateRequest(req.body);
+            validateRequest(req.body);
             const job: JobT = {
                 id: crypto.randomUUID(),
                 status: 'queued',
                 username: user.email,
                 created: now(),
                 updated: now(),
-                request: { ...req.body, states: states.map((s) => s.slug) },
+                request: req.body,
                 step: 'Queued',
                 progress: 0,
                 log: [],
-                results: [],
+                summary: [],
             };
-            log(job, `Queued by ${user.email}: ${stateLabel(states)}`);
+            const parts = [];
+            if (req.body.add.length) parts.push(`add ${defs(req.body.add).map((s) => s.abbr).join(', ')}`);
+            if (req.body.remove.length) parts.push(`remove ${defs(req.body.remove).map((s) => s.abbr).join(', ')}`);
+            log(job, `Queued by ${user.email}: ${parts.join('; ') || 'apply layer settings'}`);
             enqueue(job);
             res.json(job);
         } catch (err) {
@@ -1519,7 +1948,7 @@ export default async function router(schema: Schema, config: ConfigStateless) {
     await schema.get(`${PREFIX}/job/:jobid`, {
         name: 'Get Job',
         group: 'PluginTerrainDataDownloader',
-        description: 'Job status, progress and results',
+        description: 'Job status, progress and summary',
         params: Type.Object({ jobid: Type.String() }),
         res: JobSchema,
     }, async (req, res) => {
@@ -1536,7 +1965,7 @@ export default async function router(schema: Schema, config: ConfigStateless) {
     await schema.delete(`${PREFIX}/job/:jobid`, {
         name: 'Cancel Job',
         group: 'PluginTerrainDataDownloader',
-        description: 'Cancel a queued or running job',
+        description: 'Cancel a queued or running job (the master layers stay as they were)',
         params: Type.Object({ jobid: Type.String() }),
         res: JobSchema,
     }, async (req, res) => {
@@ -1554,26 +1983,6 @@ export default async function router(schema: Schema, config: ConfigStateless) {
             Err.respond(err, res);
         }
     });
-
-    await schema.delete(`${PREFIX}/file/:name`, {
-        name: 'Delete Hosted Tileset',
-        group: 'PluginTerrainDataDownloader',
-        description: 'Delete a hosted tileset created by this plugin (names starting with tdd-)',
-        params: Type.Object({ name: Type.String() }),
-        res: Type.Object({ status: Type.Integer(), message: Type.String() }),
-    }, async (req, res) => {
-        try {
-            await Auth.as_user(config, req, { admin: true });
-            const name = req.params.name.replace(/\.pmtiles$/, '');
-            if (!name.startsWith(FILE_PREFIX) || !/^[A-Za-z0-9._-]+$/.test(name)) {
-                throw new Err(400, null, 'Only tilesets created by the Terrain Data Downloader can be deleted here');
-            }
-            await S3.del(`public/${name}.pmtiles`);
-            res.json({ status: 200, message: 'Deleted' });
-        } catch (err) {
-            Err.respond(err, res);
-        }
-    });
 }
 
 /** Pure helpers exported for the plugin's own tests - not used by CloudTAK */
@@ -1581,4 +1990,5 @@ export const __test = {
     zxyToTileId, tileIdZoom, serializeDirectory, deserializeDirectory, encodeHeader, decodeHeader,
     filterSnapTile, mergeOutTiles, SNAP_CATEGORIES, coverPolygon, writePMTiles, TileWriter, pmtilesEntries, readAt, decompress,
     planTerrain, downloadZipEntry, stateBoundary, STATE_BY_SLUG, PM_TILETYPE, PM_COMPRESSION, PM_HEADER_LEN,
+    target, statesFromLegacyFile, fileFromUrl,
 };
