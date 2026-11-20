@@ -1,0 +1,13 @@
+{
+    "name": "cloudtak-plugin-terrain-data-downloader",
+    "version": "1.0.0",
+    "type": "module",
+    "description": "CloudTAK plugin: download US state terrain (elevation) and OSM road/trail snapping data and import it as CloudTAK hosted tilesets",
+    "license": "MIT",
+    "cloudtak": {
+        "minVersion": "13.124.0"
+    },
+    "scripts": {
+        "verify": "bash verify-cloudtak.sh"
+    }
+}
