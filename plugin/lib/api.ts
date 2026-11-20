@@ -79,7 +79,6 @@ export interface Status {
     terrain: MasterTerrain | null;
     snapping: MasterSnap | null;
     defaultTerrain: number | null;
-    defaultSnapping: number | null;
     legacy: LegacyLayer[];
     running: string | null;
     defaultCategories: string[];
@@ -104,10 +103,6 @@ export interface Job {
     error?: string;
 }
 
-export interface Settings {
-    snapping: number | null;
-}
-
 export async function listStates(): Promise<StateItem[]> {
     const res = await pstd(`${BASE}/states`) as { items: StateItem[] };
     return res.items;
@@ -120,10 +115,6 @@ export async function listCategories(): Promise<SnapCategory[]> {
 
 export async function getStatus(): Promise<Status> {
     return await pstd(`${BASE}/status`) as Status;
-}
-
-export async function getSettings(): Promise<Settings> {
-    return await pstd(`${BASE}/settings`) as Settings;
 }
 
 export async function plan(body: JobRequest): Promise<Plan> {

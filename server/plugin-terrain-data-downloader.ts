@@ -208,13 +208,13 @@ const STATE_BY_SLUG = new Map(STATES.map((s) => [s.slug, s]));
 
 const JobRequest = Type.Object({
     add: Type.Array(Type.String(), { maxItems: STATES.length, description: 'States to add to the master layers, or re-download if already present' }),
-    remove: Type.Array(Type.String(), { maxItems: STATES.length, description: 'States to remove from both master layers' }),
+    remove: Type.Array(Type.String(), { maxItems: STATES.length, description: 'States to remove from the master layers whose "enabled" is true' }),
     terrain: Type.Object({
-        enabled: Type.Boolean({ description: 'Apply "add" and the detail level to the terrain master layer' }),
+        enabled: Type.Boolean({ description: 'Apply "add", "remove" and the detail level to the terrain master layer' }),
         maxzoom: Type.Integer({ minimum: 10, maximum: 13, default: 12 }),
     }),
     snapping: Type.Object({
-        enabled: Type.Boolean({ description: 'Apply "add" and the categories to the snapping master layer' }),
+        enabled: Type.Boolean({ description: 'Apply "add", "remove" and the categories to the snapping master layer' }),
         categories: Type.Array(Type.String(), { description: 'Snapping category ids, see GET /categories' }),
     }),
 });
@@ -238,9 +238,8 @@ const MasterSnap = Type.Object({
     updated: Type.String(),
 });
 
-/** Persistent plugin state: the two master layers and the default snapping layer */
+/** Persistent plugin state: the two master layers */
 const Settings = Type.Object({
-    snapping: Type.Union([Type.Null(), Type.Integer()], { description: 'Basemap id preselected in every user\'s line tool' }),
     terrain: Type.Union([Type.Null(), MasterTerrain]),
     snap: Type.Union([Type.Null(), MasterSnap]),
 });
@@ -1072,7 +1071,7 @@ function snapCacheKey(slug: string): string {
 let settingsCache: { at: number; value: SettingsT } | null = null;
 
 function emptySettings(): SettingsT {
-    return { snapping: null, terrain: null, snap: null };
+    return { terrain: null, snap: null };
 }
 
 async function readSettings(fresh = false): Promise<SettingsT> {
@@ -1084,7 +1083,6 @@ async function readSettings(fresh = false): Promise<SettingsT> {
             for await (const chunk of await S3.get(SETTINGS_KEY)) chunks.push(Buffer.from(chunk as Buffer));
             const raw = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Partial<SettingsT>;
             value = {
-                snapping: typeof raw.snapping === 'number' ? raw.snapping : null,
                 terrain: raw.terrain && typeof raw.terrain === 'object' ? raw.terrain : null,
                 snap: raw.snap && typeof raw.snap === 'object' ? raw.snap : null,
             };
@@ -1329,22 +1327,26 @@ function target(req: JobRequestT, s: SettingsT, legacy: LegacyLayerT[]): Target 
     const tLegacy = legacy.filter((l) => l.type === 'raster-dem');
     const tBase = new Set([...(s.terrain?.states ?? []), ...tLegacy.flatMap((l) => l.states)]);
     const tNext = new Set(tBase);
-    if (req.terrain.enabled) for (const a of req.add) tNext.add(a);
-    for (const r of remove) tNext.delete(r);
+    if (req.terrain.enabled) {
+        for (const a of req.add) tNext.add(a);
+        for (const r of remove) tNext.delete(r);
+    }
     const tZoom = req.terrain.enabled ? req.terrain.maxzoom : (s.terrain?.maxzoom ?? req.terrain.maxzoom);
-    const tTouched = tLegacy.length > 0 && (req.terrain.enabled || req.remove.some((r) => tBase.has(r)))
+    const tTouched = tLegacy.length > 0 && req.terrain.enabled
         || !sameSet(tNext, s.terrain?.states ?? [])
         || (!!s.terrain && tZoom !== s.terrain.maxzoom);
 
     const sLegacy = legacy.filter((l) => l.type === 'vector');
     const sBase = new Set([...(s.snap?.states ?? []), ...sLegacy.flatMap((l) => l.states)]);
     const sNext = new Set(sBase);
-    if (req.snapping.enabled) for (const a of req.add) sNext.add(a);
-    for (const r of remove) sNext.delete(r);
+    if (req.snapping.enabled) {
+        for (const a of req.add) sNext.add(a);
+        for (const r of remove) sNext.delete(r);
+    }
     const sCats = req.snapping.enabled ? req.snapping.categories : (s.snap?.categories ?? DEFAULT_CATEGORIES);
     // Re-requesting a state that is already in the layer means "download its latest OSM data again"
     const refresh = new Set(req.snapping.enabled ? req.add.filter((a) => sBase.has(a)) : []);
-    const sTouched = sLegacy.length > 0 && (req.snapping.enabled || req.remove.some((r) => sBase.has(r)))
+    const sTouched = sLegacy.length > 0 && req.snapping.enabled
         || !sameSet(sNext, s.snap?.states ?? [])
         || (!!s.snap && !sameSet(sCats, s.snap.categories))
         || refresh.size > 0;
@@ -1371,7 +1373,7 @@ async function buildTerrain(job: JobT, s: SettingsT, t: Target['terrain'], tmp: 
         s.terrain = null;
         await writeSettings(s);
         await retireLegacy(job, t.legacy);
-        job.summary.push('Terrain layer removed (no states left)');
+        job.summary.push('Terrain layer removed');
         log(job, 'Terrain: no states left - layer removed');
         return;
     }
@@ -1478,7 +1480,7 @@ async function buildTerrain(job: JobT, s: SettingsT, t: Target['terrain'], tmp: 
     if (old?.file && old.file !== file) await deleteHostedFile(job, old.file);
     await retireLegacy(job, t.legacy);
 
-    job.summary.push(`Terrain: ${stateLabel(states)} at z${t.maxzoom} (${(written.bytes / 1e6).toFixed(0)} MB), set as the CloudTAK default terrain`);
+    job.summary.push(`Terrain updated: ${stateLabel(states)} (${(written.bytes / 1e6).toFixed(0)} MB)`);
     log(job, `Terrain: master layer ${id} updated (${(written.bytes / 1e6).toFixed(1)} MB)`);
 }
 
@@ -1541,7 +1543,8 @@ async function buildSnap(job: JobT, s: SettingsT, t: Target['snap'], tmp: string
     const states = defs(t.states);
     const removed = (old?.states ?? []).filter((slug) => !t.states.includes(slug));
 
-    for (const slug of [...removed, ...job.request.remove]) {
+    // Only states that actually left the snapping layer lose their cache (a terrain-only removal keeps it)
+    for (const slug of removed) {
         await S3.del(snapCacheKey(slug)).catch(() => undefined);
     }
 
@@ -1550,10 +1553,9 @@ async function buildSnap(job: JobT, s: SettingsT, t: Target['snap'], tmp: string
         if (old?.basemap) await deleteBasemap(job, old.basemap);
         await deleteHostedFile(job, old?.file);
         s.snap = null;
-        s.snapping = null;
         await writeSettings(s);
         await retireLegacy(job, t.legacy);
-        job.summary.push('Snapping layer removed (no states left)');
+        job.summary.push('Snapping layer removed');
         log(job, 'Snapping: no states left - layer removed');
         return;
     }
@@ -1666,12 +1668,11 @@ async function buildSnap(job: JobT, s: SettingsT, t: Target['snap'], tmp: string
     });
 
     s.snap = { basemap: id, file, states: caches.map((c) => c.state.slug), categories: t.categories, bytes: written.bytes, updated: now() };
-    s.snapping = id;
     await writeSettings(s);
     if (old?.file && old.file !== file) await deleteHostedFile(job, old.file);
     await retireLegacy(job, t.legacy);
 
-    job.summary.push(`Snapping: ${stateLabel(caches.map((c) => c.state))} with ${snapCategoryLabel(t.categories)} (${(written.bytes / 1e6).toFixed(0)} MB), preselected in every user's line tool`);
+    job.summary.push(`Snapping updated: ${stateLabel(caches.map((c) => c.state))} (${(written.bytes / 1e6).toFixed(0)} MB)`);
     log(job, `Snapping: master layer ${id} updated (${(written.bytes / 1e6).toFixed(1)} MB)`);
 }
 
@@ -1697,7 +1698,7 @@ async function runJob(job: JobT): Promise<void> {
 
         const t = target(job.request, s, legacy);
         if (!t.terrain.touched && !t.snap.touched) {
-            job.summary.push('Nothing to change - the layers already match this request');
+            job.summary.push('No changes');
             log(job, 'Nothing to change');
         }
         const both = t.terrain.touched && t.snap.touched;
@@ -1741,7 +1742,7 @@ function validateRequest(body: JobRequestT): void {
     if (!TERRAIN_ZOOMS.includes(body.terrain.maxzoom)) throw new Err(400, null, 'Unsupported terrain detail level');
     for (const c of body.snapping.categories) if (!SNAP_CATEGORY_IDS.has(c)) throw new Err(400, null, `Unknown snapping category: ${c}`);
     if (body.snapping.enabled && !body.snapping.categories.length) throw new Err(400, null, 'Select at least one snapping category');
-    if (body.add.length && !body.terrain.enabled && !body.snapping.enabled) throw new Err(400, null, 'Turn on terrain, snapping or both to add states');
+    if ((body.add.length || body.remove.length) && !body.terrain.enabled && !body.snapping.enabled) throw new Err(400, null, 'Turn on terrain, snapping or both to choose which layers to change');
 }
 
 // ---------------------------------------------------------------------------
@@ -1786,29 +1787,14 @@ export default async function router(schema: Schema, config: ConfigStateless) {
         }
     });
 
-    await schema.get(`${PREFIX}/settings`, {
-        name: 'Get Settings',
-        group: 'PluginTerrainDataDownloader',
-        description: 'The default snapping layer. Readable by every user so each client can preselect it in the line tool',
-        res: Type.Object({ snapping: Type.Union([Type.Null(), Type.Integer()]) }),
-    }, async (req, res) => {
-        try {
-            await Auth.as_user(config, req);
-            res.json({ snapping: (await readSettings()).snapping });
-        } catch (err) {
-            Err.respond(err, res);
-        }
-    });
-
     await schema.get(`${PREFIX}/status`, {
         name: 'Get Status',
         group: 'PluginTerrainDataDownloader',
-        description: 'The master terrain and snapping layers, defaults, and layers left by earlier plugin versions',
+        description: 'The master terrain and snapping layers, the default terrain, and layers left by earlier plugin versions',
         res: Type.Object({
             terrain: Type.Union([Type.Null(), MasterTerrain]),
             snapping: Type.Union([Type.Null(), MasterSnap]),
             defaultTerrain: Type.Union([Type.Null(), Type.Integer()]),
-            defaultSnapping: Type.Union([Type.Null(), Type.Integer()]),
             legacy: Type.Array(LegacyLayer),
             running: Type.Union([Type.Null(), Type.String()]),
             defaultCategories: Type.Array(Type.String()),
@@ -1821,7 +1807,6 @@ export default async function router(schema: Schema, config: ConfigStateless) {
                 terrain: s.terrain,
                 snapping: s.snap,
                 defaultTerrain: await currentDefaultTerrain(),
-                defaultSnapping: s.snapping,
                 legacy: await findLegacy(s),
                 running: runningJob,
                 defaultCategories: DEFAULT_CATEGORIES,

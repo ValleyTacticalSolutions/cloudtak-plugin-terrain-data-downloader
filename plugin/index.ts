@@ -5,11 +5,9 @@ import MenuTemplate from '../../src/components/CloudTAK/util/MenuTemplate.vue';
 import { IconMountain } from '@tabler/icons-vue';
 import TerrainDownloader from './lib/TerrainDownloader.vue';
 import { ROUTE_NAME, MENU_KEY } from './lib/api.ts';
-import { startDefaultSnapping } from './lib/default-snapping.ts';
 
 export default class TerrainDataDownloader implements PluginInstance {
     api: PluginAPI;
-    stopSnapping: (() => void) | null = null;
 
     constructor(api: PluginAPI) {
         this.api = api;
@@ -45,16 +43,9 @@ export default class TerrainDataDownloader implements PluginInstance {
             badge: 'A',
             requiresSystemAdmin: true,
         });
-
-        // Runs for every user: applies the admin's default snapping layer in the line tool
-        if (!this.stopSnapping) this.stopSnapping = startDefaultSnapping(this.api.pinia);
     }
 
     async disable(): Promise<void> {
         this.api.menu.remove(MENU_KEY);
-        if (this.stopSnapping) {
-            this.stopSnapping();
-            this.stopSnapping = null;
-        }
     }
 }

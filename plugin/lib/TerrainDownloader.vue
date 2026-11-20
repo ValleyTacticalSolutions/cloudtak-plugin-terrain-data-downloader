@@ -29,7 +29,7 @@
                         <div class='ms-auto'>
                             <TablerIconButton
                                 v-if='busy'
-                                title='Cancel (the layers stay as they were)'
+                                title='Cancel'
                                 @click='cancel'
                             >
                                 <IconPlayerStop :size='18' />
@@ -76,102 +76,6 @@
                             v-text='job.log.join("\n")'
                         />
                     </details>
-                </div>
-            </div>
-
-            <!-- What is in CloudTAK now -->
-            <div class='card mb-2'>
-                <div class='card-body py-2'>
-                    <div class='d-flex align-items-center mb-1'>
-                        <span class='fw-bold'>In CloudTAK</span>
-                        <TablerIconButton
-                            class='ms-auto'
-                            title='Refresh'
-                            @click='refreshStatus'
-                        >
-                            <IconRefresh :size='16' />
-                        </TablerIconButton>
-                    </div>
-                    <div class='d-flex align-items-start small mb-1'>
-                        <IconMountain
-                            :size='16'
-                            class='me-2 mt-1 flex-shrink-0'
-                        />
-                        <div class='flex-grow-1 tdd-min0'>
-                            <div>
-                                Terrain
-                                <span
-                                    v-if='status?.terrain && status.defaultTerrain === status.terrain.basemap'
-                                    class='badge bg-green-lt ms-1'
-                                >Default</span>
-                            </div>
-                            <div
-                                v-if='status?.terrain'
-                                class='text-secondary'
-                                v-text='`${status.terrain.states.length} state(s) · ${detailName(status.terrain.maxzoom)} · ${formatBytes(status.terrain.bytes)}`'
-                            />
-                            <div
-                                v-else
-                                class='text-secondary'
-                            >
-                                Not downloaded yet
-                            </div>
-                            <div
-                                v-if='status?.terrain'
-                                class='text-truncate'
-                            >
-                                <span
-                                    v-for='abbr in abbrs(status.terrain.states)'
-                                    :key='abbr'
-                                    class='badge bg-secondary-lt me-1'
-                                    v-text='abbr'
-                                />
-                            </div>
-                        </div>
-                    </div>
-                    <div class='d-flex align-items-start small'>
-                        <IconRoute
-                            :size='16'
-                            class='me-2 mt-1 flex-shrink-0'
-                        />
-                        <div class='flex-grow-1 tdd-min0'>
-                            <div>
-                                Snapping
-                                <span
-                                    v-if='status?.snapping && status.defaultSnapping === status.snapping.basemap'
-                                    class='badge bg-green-lt ms-1'
-                                >Default</span>
-                            </div>
-                            <div
-                                v-if='status?.snapping'
-                                class='text-secondary text-truncate'
-                                :title='categoryNames(status.snapping.categories)'
-                                v-text='`${status.snapping.states.length} state(s) · ${categoryNames(status.snapping.categories)} · ${formatBytes(status.snapping.bytes)}`'
-                            />
-                            <div
-                                v-else
-                                class='text-secondary'
-                            >
-                                Not downloaded yet
-                            </div>
-                            <div
-                                v-if='status?.snapping'
-                                class='text-truncate'
-                            >
-                                <span
-                                    v-for='abbr in abbrs(status.snapping.states)'
-                                    :key='abbr'
-                                    class='badge bg-secondary-lt me-1'
-                                    v-text='abbr'
-                                />
-                            </div>
-                        </div>
-                    </div>
-                    <div
-                        v-if='status?.legacy.length'
-                        class='small text-warning mt-1'
-                        v-text='`${status.legacy.length} layer(s) from an earlier plugin version will be merged into these on the next download.`'
-                    />
                 </div>
             </div>
 
@@ -273,15 +177,6 @@
                             </span>
                         </label>
                     </div>
-                    <div class='small text-secondary mt-2'>
-                        <IconMountain
-                            :size='12'
-                            class='text-green'
-                        /> / <IconRoute
-                            :size='12'
-                            class='text-green'
-                        /> already in the terrain / snapping layer. Downloading those again refreshes their snapping data with the latest OSM extract.
-                    </div>
                 </div>
             </div>
 
@@ -293,10 +188,7 @@
                             :size='18'
                             class='me-2'
                         />
-                        <span
-                            class='fw-bold'
-                            title='3D terrain, elevation readouts and slope shading. All states always end up in one terrain layer, which is the CloudTAK default terrain.'
-                        >Download Terrain</span>
+                        <span class='fw-bold'>Download Terrain</span>
                         <span class='form-check form-switch ms-auto mb-0'>
                             <input
                                 v-model='req.terrain.enabled'
@@ -322,7 +214,7 @@
                         <div
                             v-if='detailChanged'
                             class='small text-warning mt-1'
-                            v-text='`Rebuilds all ${status?.terrain?.states.length ?? 0} terrain state(s) at this detail level.`'
+                            v-text='`Rebuilds all ${status?.terrain?.states.length ?? 0} states.`'
                         />
                     </template>
                 </div>
@@ -336,10 +228,7 @@
                             :size='18'
                             class='me-2'
                         />
-                        <span
-                            class='fw-bold'
-                            title='OpenStreetMap lines the CloudTAK line tool snaps to. All states always end up in one snapping layer, which is preselected in every user line tool.'
-                        >Download Snapping</span>
+                        <span class='fw-bold'>Download Snapping</span>
                         <span class='form-check form-switch ms-auto mb-0'>
                             <input
                                 v-model='req.snapping.enabled'
@@ -410,14 +299,14 @@
                         <div
                             v-if='categoriesChanged'
                             class='small text-warning mt-1'
-                            v-text='`Applies to all ${status?.snapping?.states.length ?? 0} snapping state(s) from cached data - no re-download.`'
+                            v-text='`Rebuilds all ${status?.snapping?.states.length ?? 0} states.`'
                         />
                     </template>
                 </div>
             </div>
 
             <!-- Plan + actions -->
-            <div class='card'>
+            <div class='card mb-2'>
                 <div class='card-body py-2'>
                     <div class='small mb-2'>
                         <span
@@ -428,7 +317,7 @@
                         <span
                             v-else-if='planning || (!estimate && !planError)'
                             class='text-secondary'
-                        >Working out the changes...</span>
+                        >Estimating...</span>
                         <span
                             v-else-if='planError'
                             class='text-danger'
@@ -446,13 +335,13 @@
                             <div
                                 v-if='estimate.terrain.touched && estimate.terrain.tiles > estimate.terrain.limit'
                                 class='text-danger'
-                                v-text='`Over the ${estimate.terrain.limit.toLocaleString()} terrain tile limit - lower the detail level.`'
+                                v-text='`Too many tiles - lower the detail level.`'
                             />
                             <div
                                 v-if='!estimate.terrain.touched && !estimate.snapping.touched'
                                 class='text-secondary'
                             >
-                                Nothing to change - the layers already match.
+                                No changes.
                             </div>
                         </template>
                     </div>
@@ -462,14 +351,14 @@
                             type='button'
                             class='btn btn-outline-danger btn-sm text-nowrap'
                             :disabled='busy'
-                            :title='`Remove ${abbrs(removable).join(", ")} from the layers`'
+                            :title='removeTitle'
                             @click='removeSelected'
                         >
                             <IconTrash
                                 :size='16'
                                 class='me-1'
                             />
-                            Remove
+                            <span v-text='removeLabel' />
                         </button>
                         <button
                             type='button'
@@ -487,9 +376,97 @@
                 </div>
             </div>
 
-            <p class='small text-secondary mt-2 mb-0'>
-                Elevation: AWS Terrain Tiles (USGS 3DEP, SRTM, GMTED2010, ETOPO1). Snapping lines: &copy; OpenStreetMap contributors, extracts by BBBike.org.
-            </p>
+            <!-- What is in CloudTAK now -->
+            <div class='card mb-2'>
+                <div class='card-body py-2'>
+                    <div class='d-flex align-items-center mb-1'>
+                        <span class='fw-bold'>In CloudTAK</span>
+                        <TablerIconButton
+                            class='ms-auto'
+                            title='Refresh'
+                            @click='refreshStatus'
+                        >
+                            <IconRefresh :size='16' />
+                        </TablerIconButton>
+                    </div>
+                    <div class='d-flex align-items-start small mb-1'>
+                        <IconMountain
+                            :size='16'
+                            class='me-2 mt-1 flex-shrink-0'
+                        />
+                        <div class='flex-grow-1 tdd-min0'>
+                            <div>
+                                Terrain
+                                <span
+                                    v-if='status?.terrain && status.defaultTerrain === status.terrain.basemap'
+                                    class='badge bg-green-lt ms-1'
+                                >Default</span>
+                            </div>
+                            <div
+                                v-if='status?.terrain'
+                                class='text-secondary'
+                                v-text='`${status.terrain.states.length} state(s) · ${detailName(status.terrain.maxzoom)} · ${formatBytes(status.terrain.bytes)}`'
+                            />
+                            <div
+                                v-else
+                                class='text-secondary'
+                            >
+                                Not downloaded yet
+                            </div>
+                            <div
+                                v-if='status?.terrain'
+                                class='text-truncate'
+                            >
+                                <span
+                                    v-for='abbr in abbrs(status.terrain.states)'
+                                    :key='abbr'
+                                    class='badge bg-secondary-lt me-1'
+                                    v-text='abbr'
+                                />
+                            </div>
+                        </div>
+                    </div>
+                    <div class='d-flex align-items-start small'>
+                        <IconRoute
+                            :size='16'
+                            class='me-2 mt-1 flex-shrink-0'
+                        />
+                        <div class='flex-grow-1 tdd-min0'>
+                            <div>
+                                Snapping
+                            </div>
+                            <div
+                                v-if='status?.snapping'
+                                class='text-secondary text-truncate'
+                                :title='categoryNames(status.snapping.categories)'
+                                v-text='`${status.snapping.states.length} state(s) · ${categoryNames(status.snapping.categories)} · ${formatBytes(status.snapping.bytes)}`'
+                            />
+                            <div
+                                v-else
+                                class='text-secondary'
+                            >
+                                Not downloaded yet
+                            </div>
+                            <div
+                                v-if='status?.snapping'
+                                class='text-truncate'
+                            >
+                                <span
+                                    v-for='abbr in abbrs(status.snapping.states)'
+                                    :key='abbr'
+                                    class='badge bg-secondary-lt me-1'
+                                    v-text='abbr'
+                                />
+                            </div>
+                        </div>
+                    </div>
+                    <div
+                        v-if='status?.legacy.length'
+                        class='small text-warning mt-1'
+                        v-text='`${status.legacy.length} older layer(s) will be merged on the next download.`'
+                    />
+                </div>
+            </div>
         </template>
     </div>
 </template>
@@ -530,7 +507,7 @@ import { dropTerrainNow, showTerrainNow } from './live-refresh.ts';
 const DETAIL: Record<string, number> = {
     'Low detail (~120 m)': 10,
     'Medium detail (~60 m)': 11,
-    'High detail (~30 m, DTED Level 2 class)': 12,
+    'High detail (~30 m)': 12,
     'Very high detail (~15 m)': 13,
 };
 const detailOptions = Object.keys(DETAIL);
@@ -593,8 +570,26 @@ const categoriesChanged = computed(() => {
 
 const detailChanged = computed(() => !!status.value?.terrain && maxzoom.value !== status.value.terrain.maxzoom);
 
-/** States in the selection that exist in at least one layer (what Remove would remove) */
-const removable = computed(() => [...selected.value].filter((s) => inTerrain.value.has(s) || inSnapping.value.has(s)));
+/** Selected states Remove would take out of the terrain layer (only while Download Terrain is on) */
+const removeFromTerrain = computed(() => req.value.terrain.enabled ? [...selected.value].filter((s) => inTerrain.value.has(s)) : []);
+
+/** Selected states Remove would take out of the snapping layer (only while Download Snapping is on) */
+const removeFromSnapping = computed(() => req.value.snapping.enabled ? [...selected.value].filter((s) => inSnapping.value.has(s)) : []);
+
+/** Selected states Remove would affect in at least one layer */
+const removable = computed(() => [...new Set([...removeFromTerrain.value, ...removeFromSnapping.value])]);
+
+const removeLabel = computed(() => {
+    if (removeFromTerrain.value.length && removeFromSnapping.value.length) return 'Remove from both';
+    return removeFromTerrain.value.length ? 'Remove from terrain' : 'Remove from snapping';
+});
+
+const removeTitle = computed(() => {
+    const parts: string[] = [];
+    if (removeFromTerrain.value.length) parts.push(`terrain: ${abbrs(removeFromTerrain.value).join(', ')}`);
+    if (removeFromSnapping.value.length) parts.push(`snapping: ${abbrs(removeFromSnapping.value).join(', ')}`);
+    return `Remove from ${parts.join('; ')}`;
+});
 
 /** 'add' = download the selected states; 'apply' = only detail/category changes for the existing layers */
 const action = computed<'add' | 'apply' | null>(() => {
@@ -606,13 +601,13 @@ const action = computed<'add' | 'apply' | null>(() => {
 
 const idleHint = computed(() => {
     if (!req.value.terrain.enabled && !req.value.snapping.enabled) return 'Turn on terrain or snapping.';
-    return 'Select states to download, or change the detail level / categories to update the existing layers.';
+    return 'Select states to download.';
 });
 
 const terrainLine = computed(() => {
     const t = estimate.value?.terrain;
     if (!t) return '';
-    if (!t.states) return 'Terrain: layer will be deleted (no states left)';
+    if (!t.states) return 'Terrain: layer will be deleted';
     const dl = t.newTiles ? `~${formatBytes(t.bytes)} to download` : 'no new downloads';
     return `Terrain: ${t.states} state(s) at ${detailName(t.maxzoom)} · ${dl}`;
 });
@@ -620,7 +615,7 @@ const terrainLine = computed(() => {
 const snappingLine = computed(() => {
     const s = estimate.value?.snapping;
     if (!s) return '';
-    if (!s.states) return 'Snapping: layer will be deleted (no states left)';
+    if (!s.states) return 'Snapping: layer will be deleted';
     const dl = s.downloads.length ? `download ${abbrs(s.downloads).join(', ')} (${formatBytes(s.download)})` : 'rebuild from cached data';
     return `Snapping: ${s.states} state(s) · ${dl}`;
 });
@@ -683,12 +678,27 @@ function setCategories(mode: 'defaults' | 'all' | 'none'): void {
         .map((c) => c.id));
 }
 
-function body(opts: { remove?: string[] } = {}): JobRequest {
+function body(): JobRequest {
     return {
-        add: opts.remove ? [] : [...selected.value],
-        remove: opts.remove ?? [],
-        terrain: { enabled: req.value.terrain.enabled && !opts.remove, maxzoom: maxzoom.value },
-        snapping: { enabled: req.value.snapping.enabled && !opts.remove, categories: selectedCategoryIds.value },
+        add: [...selected.value],
+        remove: [],
+        terrain: { enabled: req.value.terrain.enabled, maxzoom: maxzoom.value },
+        snapping: { enabled: req.value.snapping.enabled, categories: selectedCategoryIds.value },
+    };
+}
+
+/**
+ * Removal applies to each layer whose switch is on. It keeps that layer's current detail
+ * level and categories, so half-made form changes are not applied along with the removal.
+ */
+function removeBody(): JobRequest {
+    const terrainOn = removeFromTerrain.value.length > 0;
+    const snappingOn = removeFromSnapping.value.length > 0;
+    return {
+        add: [],
+        remove: removable.value,
+        terrain: { enabled: terrainOn, maxzoom: status.value?.terrain?.maxzoom ?? maxzoom.value },
+        snapping: { enabled: snappingOn, categories: status.value?.snapping?.categories ?? selectedCategoryIds.value },
     };
 }
 
@@ -758,7 +768,8 @@ async function afterJob(finished: Job): Promise<void> {
             await dropTerrainNow(before.terrain.basemap);
         }
     } catch (err) {
-        notice.value = `The layers are updated, but this map could not refresh them automatically (${err instanceof Error ? err.message : String(err)}). Use Settings -> Refresh App.`;
+        console.error('[terrain-data-downloader] live refresh failed', err);
+        notice.value = 'Layers updated. Use Settings -> Refresh App to see them on this map.';
     }
 }
 
@@ -800,9 +811,17 @@ async function start(): Promise<void> {
 }
 
 async function removeSelected(): Promise<void> {
-    const names = abbrs(removable.value).join(', ');
-    if (!window.confirm(`Remove ${names} from the terrain and snapping layers? The layers are rebuilt without them; removing the last state deletes a layer.`)) return;
-    await submit(body({ remove: removable.value }));
+    const lines: string[] = [];
+    if (removeFromTerrain.value.length) {
+        const left = inTerrain.value.size - removeFromTerrain.value.length;
+        lines.push(`Terrain: remove ${abbrs(removeFromTerrain.value).join(', ')}${left ? '' : ' (deletes the terrain layer)'}`);
+    }
+    if (removeFromSnapping.value.length) {
+        const left = inSnapping.value.size - removeFromSnapping.value.length;
+        lines.push(`Snapping: remove ${abbrs(removeFromSnapping.value).join(', ')}${left ? '' : ' (deletes the snapping layer)'}`);
+    }
+    if (!window.confirm(`${lines.join('\n')}\n\nContinue?`)) return;
+    await submit(removeBody());
 }
 
 async function cancel(): Promise<void> {

@@ -225,9 +225,8 @@ console.log('ok - 60k-entry archive with leaf directories reads back correctly')
     const ALLC = T.SNAP_CATEGORIES.map((c) => c.id);
     const DEF = T.SNAP_CATEGORIES.filter((c) => c.default).map((c) => c.id);
     const req = (o = {}) => ({ add: [], remove: [], terrain: { enabled: true, maxzoom: 12 }, snapping: { enabled: true, categories: DEF }, ...o });
-    const empty = { snapping: null, terrain: null, snap: null };
+    const empty = { terrain: null, snap: null };
     const have = {
-        snapping: 2,
         terrain: { basemap: 1, file: 'tdd-terrain-x', states: ['delaware', 'maryland'], maxzoom: 12, bytes: 1, updated: 'a' },
         snap: { basemap: 2, file: 'tdd-snap-x', states: ['delaware', 'maryland'], categories: DEF, bytes: 1, updated: 'a' },
     };
@@ -255,16 +254,25 @@ console.log('ok - 60k-entry archive with leaf directories reads back correctly')
     assert.ok(t.snap.touched && t.snap.refresh.size === 0, 'category change rebuilds snapping without re-downloading');
     assert.equal(t.terrain.touched, false);
 
-    t = T.target(req({ remove: ['delaware'], terrain: { enabled: false, maxzoom: 12 }, snapping: { enabled: false, categories: DEF } }), have, []);
+    t = T.target(req({ remove: ['delaware'] }), have, []);
     assert.deepEqual(t.terrain.states, ['maryland'], 'remove takes a state out of terrain');
     assert.deepEqual(t.snap.states, ['maryland'], 'remove takes a state out of snapping');
     assert.ok(t.terrain.touched && t.snap.touched);
     assert.equal(t.terrain.maxzoom, 12, 'remove keeps the current detail');
     assert.deepEqual(t.snap.categories, DEF, 'remove keeps the current categories');
 
-    t = T.target(req({ remove: ['delaware', 'maryland'], terrain: { enabled: false, maxzoom: 12 }, snapping: { enabled: false, categories: DEF } }), have, []);
+    t = T.target(req({ remove: ['delaware', 'maryland'] }), have, []);
     assert.deepEqual(t.terrain.states, [], 'removing every state empties the layer (it is deleted)');
     assert.ok(t.terrain.touched && t.snap.touched);
+
+    t = T.target(req({ remove: ['delaware'], snapping: { enabled: false, categories: DEF } }), have, []);
+    assert.deepEqual(t.terrain.states, ['maryland'], 'terrain-only removal takes the state out of terrain');
+    assert.ok(!t.snap.touched, 'terrain-only removal leaves snapping untouched');
+
+    t = T.target(req({ remove: ['delaware'], terrain: { enabled: false, maxzoom: 12 } }), have, []);
+    assert.deepEqual(t.snap.states, ['maryland'], 'snapping-only removal takes the state out of snapping');
+    assert.ok(!t.terrain.touched, 'snapping-only removal leaves terrain untouched');
+    assert.equal(t.snap.refresh.size, 0, 'removal never re-downloads');
 
     t = T.target(req({ add: ['ohio'], snapping: { enabled: false, categories: DEF } }), have, []);
     assert.ok(t.terrain.touched && !t.snap.touched, 'terrain-only batch leaves snapping untouched');
@@ -277,7 +285,7 @@ console.log('ok - 60k-entry archive with leaf directories reads back correctly')
     assert.deepEqual(sorted(T.statesFromLegacyFile('tdd-snap-co-ut-20261120-2143')), ['colorado', 'utah']);
     assert.deepEqual(T.statesFromLegacyFile('tdd-roads-7states-20261120-2143'), []);
     assert.equal(T.fileFromUrl('https://tiles.x/tiles/public/tdd-snap-tn-20261120-2143/tiles/{z}/{x}/{y}.mvt'), 'tdd-snap-tn-20261120-2143');
-    console.log('ok - master-layer scenarios: first download, new batch, re-download, detail change, category change, remove, remove-all, terrain-only, legacy adoption');
+    console.log('ok - master-layer scenarios: first download, new batch, re-download, detail change, category change, remove, remove-all, terrain-only remove, snapping-only remove, terrain-only batch, legacy adoption');
 }
 
 // 8. Category filtering of cached tiles (snapping rebuild without re-download)

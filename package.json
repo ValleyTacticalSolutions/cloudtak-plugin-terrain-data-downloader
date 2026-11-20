@@ -1,9 +1,9 @@
 {
     "name": "cloudtak-plugin-terrain-data-downloader",
-    "version": "1.3.0",
+    "version": "1.3.1",
     "type": "module",
     "description": "CloudTAK plugin (admin only): download US state terrain and customizable OSM snapping data and import them as CloudTAK hosted tilesets, with default terrain/snapping options",
-    "license": "MIT",
+    "license": "AGPL-3.0-only",
     "cloudtak": {
         "minVersion": "13.124.0"
     },
