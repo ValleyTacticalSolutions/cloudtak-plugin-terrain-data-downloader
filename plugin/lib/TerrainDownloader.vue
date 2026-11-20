@@ -142,6 +142,20 @@
                         label='Detail level'
                         :options='detailOptions'
                     />
+                    <label
+                        v-if='req.terrain.enabled'
+                        class='form-check mt-2 mb-0'
+                    >
+                        <input
+                            v-model='req.terrain.makeDefault'
+                            type='checkbox'
+                            class='form-check-input'
+                        >
+                        <span class='form-check-label'>
+                            Make this the CloudTAK default terrain
+                            <span class='d-block small text-secondary'>Sets the server's Default Terrain (Admin → Config → Map), added to every user's overlays</span>
+                        </span>
+                    </label>
                 </div>
             </div>
 
@@ -150,34 +164,78 @@
                 <div class='card-body'>
                     <TablerToggle
                         v-model='req.snapping.enabled'
-                        label='Road & trail snapping'
-                        description='OpenStreetMap road and trail centerlines used by the CloudTAK line tool to snap to the network.'
+                        label='Snapping'
+                        description='OpenStreetMap lines the CloudTAK line tool snaps to. Only the categories you tick are included; everything in the layer becomes snappable.'
                     />
                     <template v-if='req.snapping.enabled'>
-                        <div class='d-flex gap-3 mt-2'>
-                            <label class='form-check'>
+                        <div class='d-flex align-items-center mt-2 mb-1'>
+                            <span
+                                class='small text-secondary'
+                                v-text='`${categories.size} of ${categoryList.length} categories`'
+                            />
+                            <div class='ms-auto btn-group btn-group-sm'>
+                                <button
+                                    type='button'
+                                    class='btn btn-outline-secondary'
+                                    @click='setCategories("defaults")'
+                                >
+                                    Defaults
+                                </button>
+                                <button
+                                    type='button'
+                                    class='btn btn-outline-secondary'
+                                    @click='setCategories("all")'
+                                >
+                                    All
+                                </button>
+                                <button
+                                    type='button'
+                                    class='btn btn-outline-secondary'
+                                    @click='setCategories("none")'
+                                >
+                                    None
+                                </button>
+                            </div>
+                        </div>
+                        <div class='tdd-cats border rounded p-2'>
+                            <label
+                                v-for='c in categoryList'
+                                :key='c.id'
+                                class='form-check mb-1'
+                            >
                                 <input
-                                    v-model='req.snapping.roads'
                                     type='checkbox'
                                     class='form-check-input'
+                                    :checked='categories.has(c.id)'
+                                    @change='toggleCategory(c.id)'
                                 >
-                                <span class='form-check-label'>Roads</span>
-                            </label>
-                            <label class='form-check'>
-                                <input
-                                    v-model='req.snapping.trails'
-                                    type='checkbox'
-                                    class='form-check-input'
-                                >
-                                <span class='form-check-label'>Trails &amp; tracks</span>
+                                <span class='form-check-label'>
+                                    <span v-text='c.label' />
+                                    <span
+                                        class='d-block small text-secondary'
+                                        v-text='c.description'
+                                    />
+                                </span>
                             </label>
                         </div>
                         <TablerToggle
                             v-if='selected.size > 1'
                             v-model='req.snapping.combine'
+                            class='mt-2'
                             label='Combine states into one snapping layer'
                             description='Recommended. CloudTAK snaps to one layer at a time, so a combined layer lets routes cross state lines.'
                         />
+                        <label class='form-check mt-2 mb-0'>
+                            <input
+                                v-model='req.snapping.makeDefault'
+                                type='checkbox'
+                                class='form-check-input'
+                            >
+                            <span class='form-check-label'>
+                                Make this the default snapping layer
+                                <span class='d-block small text-secondary'>Preselected in every user's line tool (they can still switch it off)</span>
+                            </span>
+                        </label>
                     </template>
                 </div>
             </div>
@@ -270,19 +328,25 @@
                         v-text='b.name'
                     />
                     <div
-                        v-if='b.type === "raster-dem" && defaultTerrain === b.id'
+                        v-if='isDefault(b)'
                         class='small text-success'
-                    >
-                        Default terrain for all users
-                    </div>
+                        v-text='b.type === "raster-dem" ? "Default terrain for all users" : "Default snapping layer for all users"'
+                    />
                 </div>
                 <div class='ms-auto d-flex'>
                     <TablerIconButton
-                        v-if='b.type === "raster-dem" && defaultTerrain !== b.id'
-                        title='Make default terrain for all users'
-                        @click='makeDefault(b.id)'
+                        :title='isDefault(b) ? "Remove as default" : (b.type === "raster-dem" ? "Make default terrain for all users" : "Make default snapping layer for all users")'
+                        @click='toggleDefault(b)'
                     >
-                        <IconStar :size='20' />
+                        <IconStarFilled
+                            v-if='isDefault(b)'
+                            :size='20'
+                            class='text-yellow'
+                        />
+                        <IconStar
+                            v-else
+                            :size='20'
+                        />
                     </TablerIconButton>
                     <TablerIconButton
                         title='Delete layer and hosted file'
@@ -294,7 +358,7 @@
             </div>
             <p class='small text-secondary mt-2'>
                 Users add these from <strong>Overlays</strong> (collection "Terrain Data Downloader"); snapping layers appear in the line tool's snapping list.
-                Elevation: AWS Terrain Tiles (USGS 3DEP, SRTM, GMTED2010, ETOPO1). Roads/trails: &copy; OpenStreetMap contributors, extracts by BBBike.org.
+                Elevation: AWS Terrain Tiles (USGS 3DEP, SRTM, GMTED2010, ETOPO1). Snapping lines: &copy; OpenStreetMap contributors, extracts by BBBike.org.
             </p>
         </template>
     </div>
@@ -319,6 +383,7 @@ import {
     IconRefresh,
     IconRoute,
     IconStar,
+    IconStarFilled,
     IconTrash,
     IconX,
 } from '@tabler/icons-vue';
@@ -330,15 +395,18 @@ import {
     formatBytes,
     getDefaultTerrain,
     getJob,
+    getSettings,
+    listCategories,
     listJobs,
     listManaged,
     listStates,
     plan,
     register,
+    setDefaultSnapping,
     setDefaultTerrain,
     startJob,
 } from './api.ts';
-import type { Job, JobRequest, ManagedBasemap, Plan, StateItem } from './api.ts';
+import type { Job, JobRequest, ManagedBasemap, Plan, SnapCategory, StateItem } from './api.ts';
 
 const DETAIL: Record<string, number> = {
     'Low - ~120 m (z10)': 10,
@@ -357,9 +425,12 @@ const detail = ref(detailOptions[2]);
 
 const req = ref<JobRequest>({
     states: [],
-    terrain: { enabled: true, maxzoom: 12 },
-    snapping: { enabled: true, roads: true, trails: true, combine: true },
+    terrain: { enabled: true, maxzoom: 12, makeDefault: false },
+    snapping: { enabled: true, categories: [], combine: true, makeDefault: false },
 });
+
+const categoryList = ref<SnapCategory[]>([]);
+const categories = ref<Set<string>>(new Set());
 
 const estimate = ref<Plan | null>(null);
 const planning = ref(false);
@@ -368,6 +439,7 @@ const job = ref<Job | null>(null);
 const registerError = ref('');
 const managed = ref<ManagedBasemap[]>([]);
 const defaultTerrain = ref<number | null>(null);
+const defaultSnapping = ref<number | null>(null);
 
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let planTimer: ReturnType<typeof setTimeout> | undefined;
@@ -392,7 +464,7 @@ const unregistered = computed(() => {
 const canStart = computed(() => {
     if (busy.value || !selected.value.size || planning.value || !estimate.value) return false;
     if (!req.value.terrain.enabled && !req.value.snapping.enabled) return false;
-    if (req.value.snapping.enabled && !req.value.snapping.roads && !req.value.snapping.trails) return false;
+    if (req.value.snapping.enabled && !categories.value.size) return false;
     if (req.value.terrain.enabled && estimate.value.terrain.tiles > estimate.value.terrain.limit) return false;
     return true;
 });
@@ -411,11 +483,24 @@ function selectVisible(on: boolean): void {
     selected.value = next;
 }
 
+function toggleCategory(id: string): void {
+    const next = new Set(categories.value);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    categories.value = next;
+}
+
+function setCategories(mode: 'defaults' | 'all' | 'none'): void {
+    categories.value = new Set(categoryList.value
+        .filter((c) => mode === 'all' || (mode === 'defaults' && c.default))
+        .map((c) => c.id));
+}
+
 function body(): JobRequest {
     return {
         states: Array.from(selected.value),
-        terrain: { enabled: req.value.terrain.enabled, maxzoom: DETAIL[detail.value] ?? 12 },
-        snapping: { ...req.value.snapping },
+        terrain: { ...req.value.terrain, maxzoom: DETAIL[detail.value] ?? 12 },
+        // Keep the server's category order so labels are stable
+        snapping: { ...req.value.snapping, categories: categoryList.value.filter((c) => categories.value.has(c.id)).map((c) => c.id) },
     };
 }
 
@@ -452,6 +537,25 @@ watch([selected, detail, () => req.value.terrain.enabled, () => req.value.snappi
 async function refreshManaged(): Promise<void> {
     managed.value = await listManaged();
     defaultTerrain.value = await getDefaultTerrain().catch(() => null);
+    defaultSnapping.value = await getSettings().then((s) => s.snapping).catch(() => null);
+}
+
+function isDefault(b: ManagedBasemap): boolean {
+    return b.type === 'raster-dem' ? defaultTerrain.value === b.id : defaultSnapping.value === b.id;
+}
+
+async function toggleDefault(b: ManagedBasemap): Promise<void> {
+    registerError.value = '';
+    try {
+        if (b.type === 'raster-dem') {
+            await setDefaultTerrain(isDefault(b) ? null : b.id);
+        } else {
+            await setDefaultSnapping(isDefault(b) ? null : b.id);
+        }
+    } catch (err) {
+        registerError.value = err instanceof Error ? err.message : String(err);
+    }
+    await refreshManaged();
 }
 
 /** Create CloudTAK basemaps for any finished result that is not registered yet */
@@ -459,10 +563,18 @@ async function registerResults(finished: Job): Promise<void> {
     registerError.value = '';
     await refreshManaged();
     const existing = new Set(managed.value.map((b) => fileFromUrl(b.url)));
+    let snapDefaultSet = false;
     for (const result of finished.results) {
         if (existing.has(result.file) || deletedFiles.value.has(result.file)) continue;
         try {
-            await register(result);
+            const created = await register(result);
+            if (result.kind === 'terrain' && finished.request.terrain.makeDefault) {
+                await setDefaultTerrain(created.id);
+            } else if (result.kind === 'snapping' && finished.request.snapping.makeDefault && !snapDefaultSet) {
+                // Only one layer can be preselected; with separate states the first one wins
+                await setDefaultSnapping(created.id);
+                snapDefaultSet = true;
+            }
         } catch (err) {
             registerError.value = `Could not register ${result.file}: ${err instanceof Error ? err.message : String(err)}. It is still available under Admin -> Hosted Tilesets.`;
         }
@@ -508,14 +620,14 @@ async function cancel(): Promise<void> {
     job.value = await cancelJob(job.value.id);
 }
 
-async function makeDefault(id: number): Promise<void> {
-    await setDefaultTerrain(id);
-    defaultTerrain.value = id;
-}
-
 async function remove(b: ManagedBasemap): Promise<void> {
     if (!window.confirm(`Delete "${b.name}" and its hosted tileset? Users who added it will lose it.`)) return;
     try {
+        // CloudTAK refuses to delete the default terrain, and a stale default snapping id is useless
+        if (isDefault(b)) {
+            if (b.type === 'raster-dem') await setDefaultTerrain(null);
+            else await setDefaultSnapping(null);
+        }
         await deleteBasemap(b.id);
         const file = fileFromUrl(b.url);
         if (file) {
@@ -530,7 +642,8 @@ async function remove(b: ManagedBasemap): Promise<void> {
 
 onMounted(async () => {
     try {
-        states.value = await listStates();
+        [states.value, categoryList.value] = await Promise.all([listStates(), listCategories()]);
+        setCategories('defaults');
         await refreshManaged();
 
         // Resume the most recent job (e.g. after navigating away mid-download)
@@ -556,7 +669,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.tdd-states {
+.tdd-states,
+.tdd-cats {
     max-height: 260px;
     overflow-y: auto;
 }

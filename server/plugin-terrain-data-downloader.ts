@@ -9,7 +9,8 @@
  *   Terrain  : AWS Open Data "Terrain Tiles" (Terrarium PNG, USGS 3DEP / SRTM / GMTED / ETOPO)
  *              -> tiles covering the selected state polygons -> ONE raster PMTiles archive
  *   Snapping : BBBike per-state OSM "PMTiles Shortbread" extract (zip, fetched with HTTP Range)
- *              -> keep only road/trail LineStrings from the `streets` layer, renamed `out`
+ *              -> keep only LineStrings of the admin-selected categories (roads, trails, railways,
+ *                 rivers, ...) from the relevant layers, merged into one layer `out` with a `category` field
  *              -> one PMTiles per state, or one merged archive
  *   Output   : written to the CloudTAK asset bucket under public/ - the same place as
  *              Admin -> Hosted Tilesets - so CloudTAK's PMTiles server, terrain and snapping
@@ -29,6 +30,7 @@ import Schema from '@openaddresses/batch-schema';
 import Err from '@openaddresses/batch-error';
 import Auth from '../../common/auth.js';
 import S3 from '../../common/aws/s3.js';
+import { sql } from 'drizzle-orm';
 import type ConfigStateless from '../config.js';
 
 // ---------------------------------------------------------------------------
@@ -52,10 +54,82 @@ const TERRAIN_AVG_TILE_BYTES = 55_000;
 const MAX_TERRAIN_TILES = 250_000;
 const TERRAIN_CONCURRENCY = 24;
 
-const SNAP_LAYER_IN = 'streets';
 const SNAP_LAYER_OUT = 'out';
 const RAIL_KINDS = new Set(['rail', 'narrow_gauge', 'tram', 'light_rail', 'funicular', 'subway', 'monorail', 'miniature', 'disused', 'preserved']);
-const TRAIL_KINDS = new Set(['track', 'path', 'footway', 'cycleway', 'bridleway', 'steps', 'pedestrian']);
+const TRAIL_KINDS = new Set(['path', 'footway', 'cycleway', 'bridleway', 'steps', 'pedestrian']);
+const AEROWAY_KINDS = new Set(['runway', 'taxiway']);
+const RIVER_KINDS = new Set(['river', 'canal']);
+const SETTINGS_KEY = 'plugins/terrain-data-downloader/settings.json';
+
+interface SnapCategory {
+    id: string;
+    label: string;
+    description: string;
+    default: boolean;
+    /** Shortbread source layer(s) */
+    layers: string[];
+    /** Feature belongs to this category (kind = Shortbread `kind`, rail = Shortbread `rail` flag) */
+    match: (layer: string, kind: string | null, rail: boolean) => boolean;
+}
+
+/**
+ * Snapping categories built from the LineString layers of the BBBike Shortbread extracts.
+ * Label layers (street_labels, water_lines_labels) duplicate geometry and are never used.
+ */
+const SNAP_CATEGORIES: SnapCategory[] = [
+    {
+        id: 'roads', label: 'Roads', description: 'Motorways to residential streets, including ramps', default: true,
+        layers: ['streets'],
+        match: (_l, kind, rail) => !rail && kind !== 'service' && kind !== 'track'
+            && !(kind && (TRAIL_KINDS.has(kind) || RAIL_KINDS.has(kind) || AEROWAY_KINDS.has(kind))),
+    },
+    {
+        id: 'service', label: 'Service roads', description: 'Driveways, parking aisles, alleys', default: true,
+        layers: ['streets'], match: (_l, kind, rail) => !rail && kind === 'service',
+    },
+    {
+        id: 'tracks', label: 'Tracks', description: 'Forest, farm and 4x4 tracks', default: true,
+        layers: ['streets'], match: (_l, kind, rail) => !rail && kind === 'track',
+    },
+    {
+        id: 'trails', label: 'Trails & paths', description: 'Hiking paths, footways, cycleways, bridleways, steps', default: true,
+        layers: ['streets'], match: (_l, kind, rail) => !rail && kind !== null && TRAIL_KINDS.has(kind),
+    },
+    {
+        id: 'railways', label: 'Railways', description: 'Rail, light rail, tram, subway', default: false,
+        layers: ['streets'], match: (_l, kind, rail) => rail || (kind !== null && RAIL_KINDS.has(kind)),
+    },
+    {
+        id: 'rivers', label: 'Rivers & canals', description: 'River and canal centerlines', default: false,
+        layers: ['water_lines'], match: (_l, kind) => kind !== null && RIVER_KINDS.has(kind),
+    },
+    {
+        id: 'streams', label: 'Streams & ditches', description: 'Streams, ditches and drains', default: false,
+        layers: ['water_lines'], match: (_l, kind) => kind === null || !RIVER_KINDS.has(kind),
+    },
+    {
+        id: 'aeroways', label: 'Runways & taxiways', description: 'Airport runway and taxiway centerlines', default: false,
+        layers: ['streets'], match: (_l, kind, rail) => !rail && kind !== null && AEROWAY_KINDS.has(kind),
+    },
+    {
+        id: 'ferries', label: 'Ferry routes', description: 'Ferry lines', default: false,
+        layers: ['ferries'], match: () => true,
+    },
+    {
+        id: 'aerialways', label: 'Aerialways', description: 'Ski lifts, gondolas, cable cars', default: false,
+        layers: ['aerialways'], match: () => true,
+    },
+    {
+        id: 'piers', label: 'Piers, breakwaters & dams', description: 'Piers, groynes, breakwaters and dam lines', default: false,
+        layers: ['pier_lines', 'dam_lines'], match: () => true,
+    },
+    {
+        id: 'boundaries', label: 'State & national boundaries', description: 'Administrative boundary lines', default: false,
+        layers: ['boundaries'], match: () => true,
+    },
+];
+const SNAP_CATEGORY_IDS = new Set(SNAP_CATEGORIES.map((c) => c.id));
+const SNAP_SOURCE_LAYERS = new Set(SNAP_CATEGORIES.flatMap((c) => c.layers));
 
 const MAX_JOBS_KEPT = 25;
 const MAX_LOG_LINES = 200;
@@ -136,14 +210,20 @@ const JobRequest = Type.Object({
     terrain: Type.Object({
         enabled: Type.Boolean(),
         maxzoom: Type.Integer({ minimum: 10, maximum: 13, default: 12 }),
+        makeDefault: Type.Boolean({ default: false, description: 'Set as CloudTAK default terrain (map::terrain) once registered' }),
     }),
     snapping: Type.Object({
         enabled: Type.Boolean(),
-        roads: Type.Boolean({ default: true }),
-        trails: Type.Boolean({ default: true }),
+        categories: Type.Array(Type.String(), { description: 'Snapping category ids, see GET /categories' }),
         combine: Type.Boolean({ default: true, description: 'Merge all states into one snapping layer' }),
+        makeDefault: Type.Boolean({ default: false, description: 'Preselect in every user\'s line tool once registered' }),
     }),
 });
+
+const Settings = Type.Object({
+    snapping: Type.Union([Type.Null(), Type.Integer()], { description: 'Basemap id preselected in every user\'s line tool' }),
+});
+type SettingsT = Static<typeof Settings>;
 type JobRequestT = Static<typeof JobRequest>;
 
 const ResultSchema = Type.Object({
@@ -634,14 +714,74 @@ function encodeLayer(layer: MvtLayer): Buffer {
     return tile.finish();
 }
 
-/** Keep only road/trail LineStrings from the Shortbread `streets` layer, re-emitted as layer `out` */
-function filterStreetsTile(mvt: Buffer, opts: { roads: boolean; trails: boolean }): Buffer | null {
+function encodeStringValue(s: string): Buffer {
+    const w = new PbfWriter();
+    w.bytesField(1, Buffer.from(s, 'utf8'));
+    return w.finish();
+}
+
+/** Builds one output layer from features of several source layers, remapping key/value tables */
+class LayerBuilder {
+    layer: MvtLayer = { name: SNAP_LAYER_OUT, extent: 4096, keys: [], values: [], features: [] };
+    private keyIdx = new Map<string, number>();
+    private valIdx = new Map<string, number>();
+    private seenGeom = new Set<string>();
+
+    private key(k: string): number {
+        let i = this.keyIdx.get(k);
+        if (i === undefined) { i = this.layer.keys.push(k) - 1; this.keyIdx.set(k, i); }
+        return i;
+    }
+
+    private value(v: Buffer): number {
+        const vk = v.toString('base64');
+        let i = this.valIdx.get(vk);
+        if (i === undefined) { i = this.layer.values.push(v) - 1; this.valIdx.set(vk, i); }
+        return i;
+    }
+
+    /** Adds a feature from `src`; duplicates (same geometry + category, e.g. border tiles) are dropped */
+    add(src: MvtLayer, feat: MvtFeature, category?: string): void {
+        const gkey = crypto.createHash('sha1').update(feat.geometry).update(category ?? '').digest('base64');
+        if (this.seenGeom.has(gkey)) return;
+        this.seenGeom.add(gkey);
+        this.layer.extent = src.extent;
+
+        const tags: number[] = [];
+        for (let i = 0; i + 1 < feat.tags.length; i += 2) {
+            const k = src.keys[feat.tags[i]];
+            const v = src.values[feat.tags[i + 1]];
+            if (k === undefined || v === undefined || (category && k === 'category')) continue;
+            tags.push(this.key(k), this.value(v));
+        }
+        if (category) tags.push(this.key('category'), this.value(encodeStringValue(category)));
+        this.layer.features.push({ id: feat.id, tags, type: feat.type, geometry: feat.geometry });
+    }
+
+    finish(): Buffer | null {
+        return this.layer.features.length ? encodeLayer(this.layer) : null;
+    }
+}
+
+/**
+ * Keep only LineStrings belonging to the selected snapping categories, from every relevant
+ * Shortbread layer, re-emitted as a single layer `out` with an added `category` attribute.
+ * CloudTAK's snapper requests ?type=LineString without a layer filter, so anything left in the
+ * tile becomes snappable - hence everything not selected is dropped here.
+ */
+function filterSnapTile(mvt: Buffer, categories: Set<string>): Buffer | null {
+    const active = SNAP_CATEGORIES.filter((c) => categories.has(c.id));
+    if (!active.length) return null;
+    const builder = new LayerBuilder();
+
     const r = new PbfReader(mvt);
     while (!r.done) {
         const f = r.field();
         if (f.field !== 3 || f.wire !== 2) continue;
-        const layer = decodeLayer(mvt, f.start, f.end, SNAP_LAYER_IN);
-        if (!layer) continue;
+        const layer = decodeLayer(mvt, f.start, f.end);
+        if (!layer || !SNAP_SOURCE_LAYERS.has(layer.name)) continue;
+        const candidates = active.filter((c) => c.layers.includes(layer.name));
+        if (!candidates.length) continue;
 
         const kindKey = layer.keys.indexOf('kind');
         const railKey = layer.keys.indexOf('rail');
@@ -651,32 +791,24 @@ function filterStreetsTile(mvt: Buffer, opts: { roads: boolean; trails: boolean 
             return valueCache.get(i) ?? null;
         };
 
-        layer.features = layer.features.filter((feat) => {
-            if (feat.type !== 2) return false; // LINESTRING only - snapping requests type=LineString
+        for (const feat of layer.features) {
+            if (feat.type !== 2) continue; // LINESTRING only - snapping requests type=LineString
             let kind: string | null = null;
+            let rail = false;
             for (let i = 0; i + 1 < feat.tags.length; i += 2) {
                 if (feat.tags[i] === kindKey) { const v = value(feat.tags[i + 1]); kind = typeof v === 'string' ? v : null; }
-                if (feat.tags[i] === railKey && value(feat.tags[i + 1]) === true) return false;
+                if (feat.tags[i] === railKey && value(feat.tags[i + 1]) === true) rail = true;
             }
-            if (kind && RAIL_KINDS.has(kind)) return false;
-            const isTrail = kind !== null && TRAIL_KINDS.has(kind);
-            return isTrail ? opts.trails : opts.roads;
-        });
-
-        if (!layer.features.length) return null;
-        layer.name = SNAP_LAYER_OUT;
-        return encodeLayer(layer);
+            const cat = candidates.find((c) => c.match(layer.name, kind, rail));
+            if (cat) builder.add(layer, feat, cat.id);
+        }
     }
-    return null;
+    return builder.finish();
 }
 
 /** Merge several single-layer `out` tiles (adjacent states share border tiles) */
 function mergeOutTiles(tiles: Buffer[]): Buffer {
-    const merged: MvtLayer = { name: SNAP_LAYER_OUT, extent: 4096, keys: [], values: [], features: [] };
-    const keyIdx = new Map<string, number>();
-    const valIdx = new Map<string, number>();
-    const seenGeom = new Set<string>();
-
+    const builder = new LayerBuilder();
     for (const tile of tiles) {
         const r = new PbfReader(tile);
         while (!r.done) {
@@ -684,28 +816,21 @@ function mergeOutTiles(tiles: Buffer[]): Buffer {
             if (f.field !== 3 || f.wire !== 2) continue;
             const layer = decodeLayer(tile, f.start, f.end, SNAP_LAYER_OUT);
             if (!layer) continue;
-            merged.extent = layer.extent;
+            const catKey = layer.keys.indexOf('category');
             for (const feat of layer.features) {
-                const gkey = crypto.createHash('sha1').update(feat.geometry).digest('base64');
-                if (seenGeom.has(gkey)) continue;
-                seenGeom.add(gkey);
-                const tags: number[] = [];
+                let category: string | undefined;
                 for (let i = 0; i + 1 < feat.tags.length; i += 2) {
-                    const k = layer.keys[feat.tags[i]];
-                    const v = layer.values[feat.tags[i + 1]];
-                    if (k === undefined || v === undefined) continue;
-                    let ki = keyIdx.get(k);
-                    if (ki === undefined) { ki = merged.keys.push(k) - 1; keyIdx.set(k, ki); }
-                    const vk = v.toString('base64');
-                    let vi = valIdx.get(vk);
-                    if (vi === undefined) { vi = merged.values.push(v) - 1; valIdx.set(vk, vi); }
-                    tags.push(ki, vi);
+                    if (feat.tags[i] === catKey) {
+                        const v = layer.values[feat.tags[i + 1]];
+                        const s = v ? decodeValueString(v) : null;
+                        if (typeof s === 'string') category = s;
+                    }
                 }
-                merged.features.push({ id: feat.id, tags, type: feat.type, geometry: feat.geometry });
+                builder.add(layer, feat, category);
             }
         }
     }
-    return encodeLayer(merged);
+    return builder.finish() ?? encodeLayer(builder.layer);
 }
 
 // ---------------------------------------------------------------------------
@@ -948,6 +1073,11 @@ function fileTag(states: StateDef[]): string {
     return states.length > 6 ? `${states.length}states` : states.map((s) => s.abbr.toLowerCase()).join('-');
 }
 
+function snapCategoryLabel(ids: string[]): string {
+    const labels = SNAP_CATEGORIES.filter((c) => ids.includes(c.id)).map((c) => c.label);
+    return labels.length > 3 ? `${labels.length} categories` : labels.join(', ');
+}
+
 function stateLabel(states: StateDef[]): string {
     return states.length > 4 ? `${states.length} states (${states.map((s) => s.abbr).join(', ')})` : states.map((s) => s.name).join(', ');
 }
@@ -1027,6 +1157,7 @@ async function filterSnapState(job: JobT, state: StateDef, tmp: string, span: [n
         if (d % (8 * 1024 * 1024) < 65_536) setStep(job, `Downloading ${state.name} OSM extract ${(d / 1e6).toFixed(0)} / ${(t / 1e6).toFixed(0)} MB`, span[0] + (mid - span[0]) * d / t);
     }, () => cancelFlags.has(job.id));
 
+    const categories = new Set(job.request.snapping.categories);
     const fh = await fsp.open(src, 'r');
     const writer = await TileWriter.open(path.join(tmp, `${state.slug}-snap.data`));
     try {
@@ -1042,7 +1173,7 @@ async function filterSnapState(job: JobT, state: StateDef, tmp: string, span: [n
                 await yieldLoop();
             }
             const mvt = decompress(await readAt(fh, h.dataOffset + e.offset, e.length), h.tileCompression);
-            const filtered = filterStreetsTile(mvt, job.request.snapping);
+            const filtered = filterSnapTile(mvt, categories);
             if (!filtered) continue;
             for (let i = 0; i < e.runLength; i++) await writer.add(e.tileId + i, filtered);
         }
@@ -1052,12 +1183,12 @@ async function filterSnapState(job: JobT, state: StateDef, tmp: string, span: [n
     }
 
     const store = await writer.close();
-    log(job, `Snapping: ${state.name} has ${store.entries.length.toLocaleString()} road/trail tiles`);
+    log(job, `Snapping: ${state.name} has ${store.entries.length.toLocaleString()} tiles with snapping lines`);
     return { store, bounds: boundsOf(await stateBoundary(state)) };
 }
 
 async function writeSnap(job: JobT, states: StateDef[], stores: TileStore[], bounds: [number, number, number, number], tmp: string): Promise<void> {
-    const name = `${FILE_PREFIX}roads-${fileTag(states)}-${stamp()}`;
+    const name = `${FILE_PREFIX}snap-${fileTag(states)}-${stamp()}`;
 
     // Merge tiles from every store; border tiles present in several states are combined
     const byId = new Map<number, Array<{ store: TileStore; entry: PMEntry }>>();
@@ -1090,17 +1221,17 @@ async function writeSnap(job: JobT, states: StateDef[], stores: TileStore[], bou
         tileCompression: PM_COMPRESSION.gzip,
         bounds,
         metadata: {
-            name: `Roads & Trails ${stateLabel(states)}`,
-            description: 'OSM road and trail centerlines for CloudTAK line snapping, generated by the Terrain Data Downloader plugin',
+            name: `Snapping ${stateLabel(states)}`,
+            description: `OSM lines for CloudTAK line snapping (${snapCategoryLabel(job.request.snapping.categories)}), generated by the Terrain Data Downloader plugin`,
             attribution: SNAP_ATTRIBUTION,
             type: 'overlay',
             format: 'pbf',
             vector_layers: [{
                 id: SNAP_LAYER_OUT,
-                description: 'Road and trail centerlines (OSM Shortbread streets)',
+                description: 'Snapping lines from OSM Shortbread layers; `category` holds the snapping category id',
                 minzoom: 0,
                 maxzoom: 14,
-                fields: { kind: 'String', surface: 'String', tracktype: 'String', bridge: 'Boolean', tunnel: 'Boolean', oneway: 'Boolean', link: 'Boolean', service: 'String', bicycle: 'String', horse: 'String' },
+                fields: { category: 'String', kind: 'String', surface: 'String', tracktype: 'String', bridge: 'Boolean', tunnel: 'Boolean', oneway: 'Boolean', link: 'Boolean', service: 'String', bicycle: 'String', horse: 'String' },
             }],
         },
     });
@@ -1109,7 +1240,7 @@ async function writeSnap(job: JobT, states: StateDef[], stores: TileStore[], bou
     await fsp.rm(out, { force: true });
 
     job.results.push({
-        kind: 'snapping', file: name, label: `Roads & Trails - ${stateLabel(states)}`,
+        kind: 'snapping', file: name, label: `Snapping (${snapCategoryLabel(job.request.snapping.categories)}) - ${stateLabel(states)}`,
         states: states.map((s) => s.slug), minzoom: written.minZoom, maxzoom: written.maxZoom,
         bounds, bytes: written.bytes, tiles: store.entries.length, attribution: SNAP_ATTRIBUTION,
     });
@@ -1123,7 +1254,7 @@ async function runSnapping(job: JobT, states: StateDef[], tmp: string, span: [nu
     for (let i = 0; i < states.length; i++) {
         checkCancel(job);
         const r = await filterSnapState(job, states[i], tmp, [span[0] + per * i, span[0] + per * (i + 0.9)]);
-        if (!r.store.entries.length) { log(job, `Snapping: no roads/trails found for ${states[i].name}`); continue; }
+        if (!r.store.entries.length) { log(job, `Snapping: nothing in the selected categories for ${states[i].name}`); continue; }
 
         if (job.request.snapping.combine && states.length > 1) {
             filtered.push({ state: states[i], ...r });
@@ -1196,8 +1327,40 @@ function validateRequest(body: JobRequestT): StateDef[] {
     }
     if (!body.terrain.enabled && !body.snapping.enabled) throw new Err(400, null, 'Select terrain, snapping or both');
     if (!TERRAIN_ZOOMS.includes(body.terrain.maxzoom)) throw new Err(400, null, 'Unsupported terrain detail level');
-    if (body.snapping.enabled && !body.snapping.roads && !body.snapping.trails) throw new Err(400, null, 'Select roads, trails or both for snapping');
+    if (body.snapping.enabled) {
+        if (!body.snapping.categories.length) throw new Err(400, null, 'Select at least one snapping category');
+        for (const c of body.snapping.categories) if (!SNAP_CATEGORY_IDS.has(c)) throw new Err(400, null, `Unknown snapping category: ${c}`);
+    }
     return states;
+}
+
+// ---------------------------------------------------------------------------
+// Persistent plugin settings (asset bucket, outside public/ so it is never served as a tileset)
+// ---------------------------------------------------------------------------
+
+let settingsCache: { at: number; value: SettingsT } | null = null;
+
+async function readSettings(): Promise<SettingsT> {
+    if (settingsCache && Date.now() - settingsCache.at < 30_000) return settingsCache.value;
+    let value: SettingsT = { snapping: null };
+    try {
+        if (await S3.exists(SETTINGS_KEY)) {
+            const chunks: Buffer[] = [];
+            for await (const chunk of await S3.get(SETTINGS_KEY)) chunks.push(Buffer.from(chunk as Buffer));
+            const raw = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Partial<SettingsT>;
+            value = { snapping: typeof raw.snapping === 'number' ? raw.snapping : null };
+        }
+    } catch (err) {
+        console.error('plugin-terrain-data-downloader: could not read settings', err);
+    }
+    settingsCache = { at: Date.now(), value };
+    return value;
+}
+
+async function writeSettings(value: SettingsT): Promise<SettingsT> {
+    await S3.put(SETTINGS_KEY, JSON.stringify(value));
+    settingsCache = { at: Date.now(), value };
+    return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,6 +1380,58 @@ export default async function router(schema: Schema, config: ConfigStateless) {
         try {
             await Auth.as_user(config, req, { admin: true });
             res.json({ total: STATES.length, items: STATES.map(({ slug, abbr, name, area }) => ({ slug, abbr, name, area })) });
+        } catch (err) {
+            Err.respond(err, res);
+        }
+    });
+
+    await schema.get(`${PREFIX}/categories`, {
+        name: 'List Snapping Categories',
+        group: 'PluginTerrainDataDownloader',
+        description: 'Line categories that can be included in a snapping layer',
+        res: Type.Object({
+            total: Type.Integer(),
+            items: Type.Array(Type.Object({ id: Type.String(), label: Type.String(), description: Type.String(), default: Type.Boolean() })),
+        }),
+    }, async (req, res) => {
+        try {
+            await Auth.as_user(config, req, { admin: true });
+            const items = SNAP_CATEGORIES.map((c) => ({ id: c.id, label: c.label, description: c.description, default: c.default }));
+            res.json({ total: items.length, items });
+        } catch (err) {
+            Err.respond(err, res);
+        }
+    });
+
+    await schema.get(`${PREFIX}/settings`, {
+        name: 'Get Settings',
+        group: 'PluginTerrainDataDownloader',
+        description: 'Plugin defaults. Readable by every user so each client can preselect the default snapping layer',
+        res: Settings,
+    }, async (req, res) => {
+        try {
+            await Auth.as_user(config, req);
+            res.json(await readSettings());
+        } catch (err) {
+            Err.respond(err, res);
+        }
+    });
+
+    await schema.put(`${PREFIX}/settings`, {
+        name: 'Update Settings',
+        group: 'PluginTerrainDataDownloader',
+        description: 'Set the default snapping layer (basemap id, or null for none)',
+        body: Settings,
+        res: Settings,
+    }, async (req, res) => {
+        try {
+            await Auth.as_user(config, req, { admin: true });
+            if (req.body.snapping !== null) {
+                const basemap = await config.models.Basemap.from(req.body.snapping);
+                const snap = await config.models.Basemap.list({ limit: 1, where: sql`id = ${req.body.snapping} AND id IN (SELECT basemap FROM basemaps_vector WHERE snapping_enabled = true)` });
+                if (basemap.username || !snap.items.length) throw new Err(400, null, 'Default snapping layer must be a server-scoped basemap with snapping enabled');
+            }
+            res.json(await writeSettings({ snapping: req.body.snapping }));
         } catch (err) {
             Err.respond(err, res);
         }
@@ -1364,6 +1579,6 @@ export default async function router(schema: Schema, config: ConfigStateless) {
 /** Pure helpers exported for the plugin's own tests - not used by CloudTAK */
 export const __test = {
     zxyToTileId, tileIdZoom, serializeDirectory, deserializeDirectory, encodeHeader, decodeHeader,
-    filterStreetsTile, mergeOutTiles, coverPolygon, writePMTiles, TileWriter, pmtilesEntries, readAt, decompress,
+    filterSnapTile, mergeOutTiles, SNAP_CATEGORIES, coverPolygon, writePMTiles, TileWriter, pmtilesEntries, readAt, decompress,
     planTerrain, downloadZipEntry, stateBoundary, STATE_BY_SLUG, PM_TILETYPE, PM_COMPRESSION, PM_HEADER_LEN,
 };

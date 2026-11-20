@@ -60,7 +60,8 @@ const srcHeader = T.decodeHeader(fs.readFileSync(src).subarray(0, 127));
 assert.equal(srcHeader.tileType, T.PM_TILETYPE.mvt);
 console.log(`ok - extracted ${(fs.statSync(src).size / 1e6).toFixed(1)} MB Shortbread archive over HTTP Range (${srcHeader.tileEntries} entries)`);
 
-// 3. Filter streets
+// 3. Filter snapping lines (default categories)
+const DEFAULT_CATS = new Set(T.SNAP_CATEGORIES.filter((c) => c.default).map((c) => c.id));
 const fh = await fsp.open(src, 'r');
 const writer = await T.TileWriter.open(path.join(work, 'de-snap.data'));
 const kinds = new Map();
@@ -70,7 +71,7 @@ const rawByZ = new Map();
 for await (const e of T.pmtilesEntries(fh, srcHeader)) {
     scanned++;
     const mvt = T.decompress(await T.readAt(fh, srcHeader.dataOffset + e.offset, e.length), srcHeader.tileCompression);
-    const out = T.filterStreetsTile(mvt, { roads: true, trails: true });
+    const out = T.filterSnapTile(mvt, DEFAULT_CATS);
     if (!out) continue;
     kept++;
     const z = T.tileIdZoom(e.tileId);
@@ -117,27 +118,43 @@ for (let i = 0; i < layer.length; i++) {
     const f = layer.feature(i);
     assert.equal(f.type, 2, 'non-LineString kept');
     const k = String(f.properties.kind);
-    assert.ok(!['rail', 'light_rail', 'subway', 'tram'].includes(k), `rail kept: ${k}`);
+    assert.ok(!['rail', 'light_rail', 'subway', 'tram', 'runway', 'taxiway'].includes(k), `non-default kind kept: ${k}`);
+    assert.ok(DEFAULT_CATS.has(String(f.properties.category)), `bad category ${f.properties.category}`);
     kinds.set(k, (kinds.get(k) || 0) + 1);
     f.loadGeometry();
 }
 console.log(`ok - Wilmington z14 tile decodes: ${layer.length} LineStrings, kinds`, Object.fromEntries(kinds));
 
-// roads-only / trails-only split
+// Category isolation: each category alone contains only itself, and the parts add up to the whole
 const anyTile = Buffer.from(tile.data);
-const TRAILS = ['track', 'path', 'footway', 'cycleway', 'bridleway', 'steps', 'pedestrian'];
-const srcTile = await new pmtiles.PMTiles(new FileSource(src)).getZxy(14, wx, wy);
-const srcMvt = Buffer.from(srcTile.data);
-for (const [opts, check] of [
-    [{ roads: true, trails: false }, (k) => !TRAILS.includes(k)],
-    [{ roads: false, trails: true }, (k) => TRAILS.includes(k)],
-]) {
-    const out = T.filterStreetsTile(srcMvt, opts);
-    if (!out) continue;
-    const l = new VectorTile(new Pbf(new Uint8Array(out))).layers.out;
-    for (let i = 0; i < l.length; i++) assert.ok(check(String(l.feature(i).properties.kind)), `filter ${JSON.stringify(opts)} leaked ${l.feature(i).properties.kind}`);
+const srcPm = new pmtiles.PMTiles(new FileSource(src));
+const ALL = new Set(T.SNAP_CATEGORIES.map((c) => c.id));
+const totals = Object.fromEntries([...ALL].map((c) => [c, 0]));
+let wholeTotal = 0;
+const decodeOut = (buf) => (buf ? new VectorTile(new Pbf(new Uint8Array(buf))).layers.out : null);
+for (let x = wx - 12; x <= wx + 12; x += 2) for (let y = wy - 40; y <= wy + 60; y += 4) {
+    const st = await srcPm.getZxy(14, x, y);
+    if (!st) continue;
+    const mvt = Buffer.from(st.data);
+    const whole = decodeOut(T.filterSnapTile(mvt, ALL));
+    wholeTotal += whole ? whole.length : 0;
+    let parts = 0;
+    for (const id of ALL) {
+        const l = decodeOut(T.filterSnapTile(mvt, new Set([id])));
+        if (!l) continue;
+        for (let i = 0; i < l.length; i++) {
+            assert.equal(l.feature(i).properties.category, id, `category ${id} leaked ${l.feature(i).properties.category}`);
+            assert.equal(l.feature(i).type, 2);
+        }
+        totals[id] += l.length;
+        parts += l.length;
+    }
+    assert.equal(parts, whole ? whole.length : 0, `tile 14/${x}/${y}: categories overlap or drop features`);
 }
-console.log('ok - roads-only and trails-only filters are exclusive');
+assert.equal(T.filterSnapTile(srcMvtOrEmpty(), new Set()), null);
+for (const must of ['roads', 'service', 'trails', 'railways', 'rivers', 'streams', 'boundaries']) assert.ok(totals[must] > 0, `no ${must} found in sample`);
+console.log(`ok - ${ALL.size} categories are exclusive and complete over ${wholeTotal} sampled lines:`, totals);
+function srcMvtOrEmpty() { return Buffer.alloc(0); }
 
 // 4. Merge border tiles (merge a tile with itself -> all features de-duplicated)
 const merged = T.mergeOutTiles([anyTile, anyTile]);

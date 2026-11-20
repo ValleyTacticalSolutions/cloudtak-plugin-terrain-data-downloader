@@ -18,10 +18,21 @@ export interface StateItem {
     area: number;
 }
 
+export interface SnapCategory {
+    id: string;
+    label: string;
+    description: string;
+    default: boolean;
+}
+
 export interface JobRequest {
     states: string[];
-    terrain: { enabled: boolean; maxzoom: number };
-    snapping: { enabled: boolean; roads: boolean; trails: boolean; combine: boolean };
+    terrain: { enabled: boolean; maxzoom: number; makeDefault: boolean };
+    snapping: { enabled: boolean; categories: string[]; combine: boolean; makeDefault: boolean };
+}
+
+export interface Settings {
+    snapping: number | null;
 }
 
 export interface Plan {
@@ -68,6 +79,19 @@ export interface ManagedBasemap {
 export async function listStates(): Promise<StateItem[]> {
     const res = await std(`${BASE}/states`) as { items: StateItem[] };
     return res.items;
+}
+
+export async function listCategories(): Promise<SnapCategory[]> {
+    const res = await std(`${BASE}/categories`) as { items: SnapCategory[] };
+    return res.items;
+}
+
+export async function getSettings(): Promise<Settings> {
+    return await std(`${BASE}/settings`) as Settings;
+}
+
+export async function setDefaultSnapping(id: number | null): Promise<Settings> {
+    return await std(`${BASE}/settings`, { method: 'PUT', body: { snapping: id } }) as Settings;
 }
 
 export async function plan(body: JobRequest): Promise<Plan> {
@@ -168,7 +192,7 @@ export async function getDefaultTerrain(): Promise<number | null> {
     return v === null || v === undefined || v === '' ? null : Number(v);
 }
 
-export async function setDefaultTerrain(id: number): Promise<void> {
+export async function setDefaultTerrain(id: number | null): Promise<void> {
     await std('/api/config', { method: 'PUT', body: { 'map::terrain': id } });
 }
 
