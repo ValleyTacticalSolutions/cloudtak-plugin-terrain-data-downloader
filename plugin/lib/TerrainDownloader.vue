@@ -74,106 +74,179 @@
             </div>
 
             <!-- States -->
-            <div class='mb-3'>
-                <div class='d-flex align-items-center mb-1'>
-                    <label class='form-label mb-0'>
-                        States <span
-                            class='text-secondary'
-                            v-text='`(${selected.size} selected)`'
+            <div class='card mb-2'>
+                <div
+                    class='tdd-head card-body py-2 d-flex align-items-center'
+                    role='button'
+                    @click='open.states = !open.states'
+                >
+                    <IconChevronRight
+                        :size='18'
+                        class='tdd-chev me-1'
+                        :class='{ "tdd-chev--open": open.states }'
+                    />
+                    <span class='fw-bold me-2'>States</span>
+                    <span
+                        v-if='!selected.size'
+                        class='small text-secondary'
+                    >None selected</span>
+                    <span
+                        v-else
+                        class='tdd-chips text-truncate'
+                    >
+                        <span
+                            v-for='abbr in selectedAbbrs.slice(0, 8)'
+                            :key='abbr'
+                            class='badge bg-blue-lt me-1'
+                            v-text='abbr'
                         />
-                    </label>
-                    <div class='ms-auto btn-group btn-group-sm'>
-                        <button
-                            type='button'
-                            class='btn btn-outline-secondary'
-                            @click='selectVisible(true)'
+                        <span
+                            v-if='selectedAbbrs.length > 8'
+                            class='small text-secondary'
+                            v-text='`+${selectedAbbrs.length - 8}`'
+                        />
+                    </span>
+                </div>
+                <div
+                    v-if='open.states'
+                    class='card-body pt-0'
+                >
+                    <div class='d-flex align-items-center gap-2 mb-2'>
+                        <div class='flex-grow-1'>
+                            <TablerInput
+                                v-model='filter'
+                                icon='search'
+                                placeholder='Filter states'
+                            />
+                        </div>
+                        <div class='btn-group btn-group-sm'>
+                            <button
+                                type='button'
+                                class='btn btn-outline-secondary'
+                                @click='selectVisible(true)'
+                            >
+                                All
+                            </button>
+                            <button
+                                type='button'
+                                class='btn btn-outline-secondary'
+                                @click='selectVisible(false)'
+                            >
+                                None
+                            </button>
+                        </div>
+                    </div>
+                    <div class='tdd-grid tdd-scroll'>
+                        <label
+                            v-for='s in visibleStates'
+                            :key='s.slug'
+                            class='form-check mb-0'
+                            :title='s.name'
                         >
-                            All
-                        </button>
-                        <button
-                            type='button'
-                            class='btn btn-outline-secondary'
-                            @click='selectVisible(false)'
-                        >
-                            None
-                        </button>
+                            <input
+                                type='checkbox'
+                                class='form-check-input'
+                                :checked='selected.has(s.slug)'
+                                @change='toggle(s.slug)'
+                            >
+                            <span class='form-check-label text-truncate d-block'>
+                                <span
+                                    class='text-secondary me-1'
+                                    v-text='s.abbr'
+                                />
+                                <span v-text='s.name' />
+                            </span>
+                        </label>
                     </div>
                 </div>
-                <TablerInput
-                    v-model='filter'
-                    icon='search'
-                    placeholder='Filter states'
-                />
-                <div class='tdd-states border rounded mt-2 p-2'>
-                    <label
-                        v-for='s in visibleStates'
-                        :key='s.slug'
-                        class='form-check mb-1'
-                    >
-                        <input
-                            type='checkbox'
-                            class='form-check-input'
-                            :checked='selected.has(s.slug)'
-                            @change='toggle(s.slug)'
+            </div>
+
+            <!-- Download Terrain -->
+            <div class='card mb-2'>
+                <div class='card-body py-2'>
+                    <label class='d-flex align-items-center mb-0'>
+                        <IconMountain
+                            :size='18'
+                            class='me-2'
+                        />
+                        <span
+                            class='fw-bold'
+                            title='3D terrain, elevation readouts and slope shading. Multiple states are always combined into one terrain layer, because CloudTAK uses one active terrain at a time.'
+                        >Download Terrain</span>
+                        <span class='form-check form-switch ms-auto mb-0'>
+                            <input
+                                v-model='req.terrain.enabled'
+                                class='form-check-input'
+                                type='checkbox'
+                                role='switch'
+                            >
+                        </span>
+                    </label>
+                    <template v-if='req.terrain.enabled'>
+                        <select
+                            v-model='detail'
+                            class='form-select form-select-sm mt-2'
+                            aria-label='Terrain detail level'
                         >
-                        <span class='form-check-label'>
-                            <span
-                                class='text-secondary me-1'
-                                v-text='s.abbr'
+                            <option
+                                v-for='o in detailOptions'
+                                :key='o'
+                                :value='o'
+                                v-text='o'
                             />
-                            <span v-text='s.name' />
-                        </span>
-                    </label>
-                </div>
-            </div>
-
-            <!-- Terrain -->
-            <div class='card mb-3'>
-                <div class='card-body'>
-                    <TablerToggle
-                        v-model='req.terrain.enabled'
-                        label='Terrain (elevation)'
-                        description='3D terrain, elevation queries and slope shading in CloudTAK. Multiple states are always combined into one terrain layer because CloudTAK uses one active terrain at a time.'
-                    />
-                    <TablerEnum
-                        v-if='req.terrain.enabled'
-                        v-model='detail'
-                        class='mt-2'
-                        label='Detail level'
-                        :options='detailOptions'
-                    />
-                    <label
-                        v-if='req.terrain.enabled'
-                        class='form-check mt-2 mb-0'
-                    >
-                        <input
-                            v-model='req.terrain.makeDefault'
-                            type='checkbox'
-                            class='form-check-input'
+                        </select>
+                        <label
+                            class='form-check mt-2 mb-0'
+                            title='Sets the server Default Terrain (Admin → Config → Map). CloudTAK adds it to the overlays of new users and of users without a terrain layer.'
                         >
-                        <span class='form-check-label'>
-                            Make this the CloudTAK default terrain
-                            <span class='d-block small text-secondary'>Sets the server's Default Terrain (Admin → Config → Map), added to every user's overlays</span>
-                        </span>
-                    </label>
+                            <input
+                                v-model='req.terrain.makeDefault'
+                                type='checkbox'
+                                class='form-check-input'
+                            >
+                            <span class='form-check-label small'>Make this the CloudTAK default terrain</span>
+                        </label>
+                    </template>
                 </div>
             </div>
 
-            <!-- Snapping -->
-            <div class='card mb-3'>
-                <div class='card-body'>
-                    <TablerToggle
-                        v-model='req.snapping.enabled'
-                        label='Snapping'
-                        description='OpenStreetMap lines the CloudTAK line tool snaps to. Only the categories you tick are included; everything in the layer becomes snappable.'
-                    />
+            <!-- Download Snapping -->
+            <div class='card mb-2'>
+                <div class='card-body py-2'>
+                    <label class='d-flex align-items-center mb-0'>
+                        <IconRoute
+                            :size='18'
+                            class='me-2'
+                        />
+                        <span
+                            class='fw-bold'
+                            title='OpenStreetMap lines the CloudTAK line tool snaps to. Only the selected categories are included; everything in the layer becomes snappable.'
+                        >Download Snapping</span>
+                        <span class='form-check form-switch ms-auto mb-0'>
+                            <input
+                                v-model='req.snapping.enabled'
+                                class='form-check-input'
+                                type='checkbox'
+                                role='switch'
+                            >
+                        </span>
+                    </label>
                     <template v-if='req.snapping.enabled'>
-                        <div class='d-flex align-items-center mt-2 mb-1'>
+                        <div class='d-flex align-items-start mt-2 small'>
                             <span
-                                class='small text-secondary'
-                                v-text='`${categories.size} of ${categoryList.length} categories`'
+                                class='text-secondary me-2 flex-grow-1'
+                                :class='{ "text-danger": !categories.size }'
+                                v-text='categorySummary'
                             />
-                            <div class='ms-auto btn-group btn-group-sm'>
+                            <a
+                                href='#'
+                                class='text-nowrap'
+                                @click.prevent='open.categories = !open.categories'
+                                v-text='open.categories ? "Done" : "Customize"'
+                            />
+                        </div>
+                        <template v-if='open.categories'>
+                            <div class='btn-group btn-group-sm mt-2'>
                                 <button
                                     type='button'
                                     class='btn btn-outline-secondary'
@@ -196,170 +269,188 @@
                                     None
                                 </button>
                             </div>
-                        </div>
-                        <div class='tdd-cats border rounded p-2'>
-                            <label
-                                v-for='c in categoryList'
-                                :key='c.id'
-                                class='form-check mb-1'
-                            >
-                                <input
-                                    type='checkbox'
-                                    class='form-check-input'
-                                    :checked='categories.has(c.id)'
-                                    @change='toggleCategory(c.id)'
+                            <div class='tdd-grid mt-2'>
+                                <label
+                                    v-for='c in categoryList'
+                                    :key='c.id'
+                                    class='form-check mb-0'
+                                    :title='c.description'
                                 >
-                                <span class='form-check-label'>
-                                    <span v-text='c.label' />
+                                    <input
+                                        type='checkbox'
+                                        class='form-check-input'
+                                        :checked='categories.has(c.id)'
+                                        @change='toggleCategory(c.id)'
+                                    >
                                     <span
-                                        class='d-block small text-secondary'
-                                        v-text='c.description'
+                                        class='form-check-label small text-truncate d-block'
+                                        v-text='c.label'
                                     />
-                                </span>
-                            </label>
-                        </div>
-                        <TablerToggle
+                                </label>
+                            </div>
+                        </template>
+                        <label
                             v-if='selected.size > 1'
-                            v-model='req.snapping.combine'
-                            class='mt-2'
-                            label='Combine states into one snapping layer'
-                            description='Recommended. CloudTAK snaps to one layer at a time, so a combined layer lets routes cross state lines.'
-                        />
-                        <label class='form-check mt-2 mb-0'>
+                            class='form-check mt-2 mb-0'
+                            title='Recommended. CloudTAK snaps to one layer at a time, so a combined layer lets routes cross state lines.'
+                        >
                             <input
-                                v-model='req.snapping.makeDefault'
+                                v-model='req.snapping.combine'
                                 type='checkbox'
                                 class='form-check-input'
                             >
-                            <span class='form-check-label'>
-                                Make this the default snapping layer
-                                <span class='d-block small text-secondary'>Preselected in every user's line tool (they can still switch it off)</span>
-                            </span>
+                            <span class='form-check-label small'>Combine states into one snapping layer</span>
                         </label>
                     </template>
                 </div>
             </div>
 
             <!-- Estimate + start -->
-            <div class='card mb-3'>
-                <div class='card-body small'>
-                    <div
-                        v-if='planning'
-                        class='text-secondary'
-                    >
-                        Estimating...
+            <div class='card mb-2'>
+                <div class='card-body py-2 d-flex align-items-center gap-2'>
+                    <div class='small flex-grow-1'>
+                        <span
+                            v-if='!selected.size'
+                            class='text-secondary'
+                        >Select at least one state.</span>
+                        <span
+                            v-else-if='!req.terrain.enabled && !req.snapping.enabled'
+                            class='text-secondary'
+                        >Turn on terrain or snapping.</span>
+                        <span
+                            v-else-if='planning || (!estimate && !planError)'
+                            class='text-secondary'
+                        >Estimating...</span>
+                        <span
+                            v-else-if='planError'
+                            class='text-danger'
+                            v-text='planError'
+                        />
+                        <template v-else-if='estimate'>
+                            <div v-if='req.terrain.enabled'>
+                                Terrain ~<strong v-text='formatBytes(estimate.terrain.bytes)' />
+                                <span
+                                    class='text-secondary'
+                                    v-text='` (${estimate.terrain.tiles.toLocaleString()} tiles)`'
+                                />
+                                <span
+                                    v-if='estimate.terrain.tiles > estimate.terrain.limit'
+                                    class='text-danger'
+                                    v-text='` over the ${estimate.terrain.limit.toLocaleString()} tile limit`'
+                                />
+                            </div>
+                            <div v-if='req.snapping.enabled'>
+                                Snapping <strong v-text='formatBytes(estimate.snapping.download)' />
+                                <span class='text-secondary'> download</span>
+                            </div>
+                        </template>
                     </div>
-                    <template v-else-if='estimate'>
-                        <div v-if='req.terrain.enabled'>
-                            Terrain: <strong v-text='estimate.terrain.tiles.toLocaleString()' /> tiles,
-                            about <strong v-text='formatBytes(estimate.terrain.bytes)' />
-                            <span
-                                v-if='estimate.terrain.tiles > estimate.terrain.limit'
-                                class='text-danger'
-                                v-text='` - over the ${estimate.terrain.limit.toLocaleString()} tile limit, lower the detail level`'
-                            />
-                        </div>
-                        <div v-if='req.snapping.enabled'>
-                            Snapping: <strong v-text='formatBytes(estimate.snapping.download)' /> OSM download (the stored layer is smaller)
-                        </div>
-                    </template>
-                    <div
-                        v-else-if='planError'
-                        class='text-danger'
-                        v-text='planError'
-                    />
-                    <div
-                        v-else
-                        class='text-secondary'
-                    >
-                        Select at least one state.
-                    </div>
-                </div>
-                <div class='card-footer d-flex'>
                     <button
                         type='button'
-                        class='btn btn-primary ms-auto'
+                        class='btn btn-primary btn-sm text-nowrap'
                         :disabled='!canStart'
                         @click='start'
                     >
                         <IconDownload
-                            :size='18'
+                            :size='16'
                             class='me-1'
                         />
-                        Download &amp; import
+                        Download
                     </button>
                 </div>
             </div>
 
-            <!-- Managed layers -->
-            <div class='mb-2 d-flex align-items-center'>
-                <label class='form-label mb-0'>Imported layers</label>
-                <TablerIconButton
-                    class='ms-auto'
-                    title='Refresh'
-                    @click='refreshManaged'
+            <!-- Imported layers -->
+            <div class='card'>
+                <div
+                    class='tdd-head card-body py-2 d-flex align-items-center'
+                    role='button'
+                    @click='open.layers = !open.layers'
                 >
-                    <IconRefresh :size='20' />
-                </TablerIconButton>
-            </div>
-            <TablerNone
-                v-if='!managed.length'
-                label='No layers imported yet'
-                :create='false'
-            />
-            <div
-                v-for='b in managed'
-                :key='b.id'
-                class='d-flex align-items-center border rounded p-2 mb-2'
-            >
-                <IconMountain
-                    v-if='b.type === "raster-dem"'
-                    :size='20'
-                    class='me-2'
-                />
-                <IconRoute
-                    v-else
-                    :size='20'
-                    class='me-2'
-                />
-                <div class='text-truncate'>
-                    <div
-                        class='text-truncate'
-                        v-text='b.name'
+                    <IconChevronRight
+                        :size='18'
+                        class='tdd-chev me-1'
+                        :class='{ "tdd-chev--open": open.layers }'
                     />
-                    <div
-                        v-if='isDefault(b)'
-                        class='small text-success'
-                        v-text='b.type === "raster-dem" ? "Default terrain for all users" : "Default snapping layer for all users"'
+                    <span class='fw-bold me-2'>Imported layers</span>
+                    <span
+                        class='badge bg-secondary-lt'
+                        v-text='managed.length'
                     />
-                </div>
-                <div class='ms-auto d-flex'>
                     <TablerIconButton
-                        :title='isDefault(b) ? "Remove as default" : (b.type === "raster-dem" ? "Make default terrain for all users" : "Make default snapping layer for all users")'
-                        @click='toggleDefault(b)'
+                        class='ms-auto'
+                        title='Refresh'
+                        @click.stop='refreshManaged'
                     >
-                        <IconStarFilled
-                            v-if='isDefault(b)'
-                            :size='20'
-                            class='text-yellow'
+                        <IconRefresh :size='18' />
+                    </TablerIconButton>
+                </div>
+                <div
+                    v-if='open.layers'
+                    class='card-body pt-0'
+                >
+                    <div
+                        v-if='!managed.length'
+                        class='small text-secondary'
+                    >
+                        No layers imported yet.
+                    </div>
+                    <div
+                        v-for='b in managed'
+                        :key='b.id'
+                        class='d-flex align-items-center border rounded px-2 py-1 mb-1'
+                    >
+                        <IconMountain
+                            v-if='b.type === "raster-dem"'
+                            :size='18'
+                            class='me-2 flex-shrink-0'
                         />
-                        <IconStar
+                        <IconRoute
                             v-else
-                            :size='20'
+                            :size='18'
+                            class='me-2 flex-shrink-0'
                         />
-                    </TablerIconButton>
-                    <TablerIconButton
-                        title='Delete layer and hosted file'
-                        @click='remove(b)'
-                    >
-                        <IconTrash :size='20' />
-                    </TablerIconButton>
+                        <div class='text-truncate small'>
+                            <div
+                                class='text-truncate'
+                                :title='b.name'
+                                v-text='b.name'
+                            />
+                            <div
+                                v-if='isDefault(b)'
+                                class='text-success'
+                                v-text='b.type === "raster-dem" ? "Default terrain" : "Default snapping layer"'
+                            />
+                        </div>
+                        <div class='ms-auto d-flex flex-shrink-0'>
+                            <TablerIconButton
+                                :title='isDefault(b) ? "Remove as default" : (b.type === "raster-dem" ? "Make default terrain for all users" : "Make default snapping layer for all users")'
+                                @click='toggleDefault(b)'
+                            >
+                                <IconStarFilled
+                                    v-if='isDefault(b)'
+                                    :size='18'
+                                    class='text-yellow'
+                                />
+                                <IconStar
+                                    v-else
+                                    :size='18'
+                                />
+                            </TablerIconButton>
+                            <TablerIconButton
+                                title='Delete layer and hosted file'
+                                @click='remove(b)'
+                            >
+                                <IconTrash :size='18' />
+                            </TablerIconButton>
+                        </div>
+                    </div>
+                    <p class='small text-secondary mt-2 mb-0'>
+                        Users add these from <strong>Overlays</strong> (collection "Terrain Data Downloader"); snapping layers appear in the line tool's snapping list.
+                        Elevation: AWS Terrain Tiles (USGS 3DEP, SRTM, GMTED2010, ETOPO1). Snapping lines: &copy; OpenStreetMap contributors, extracts by BBBike.org.
+                    </p>
                 </div>
             </div>
-            <p class='small text-secondary mt-2'>
-                Users add these from <strong>Overlays</strong> (collection "Terrain Data Downloader"); snapping layers appear in the line tool's snapping list.
-                Elevation: AWS Terrain Tiles (USGS 3DEP, SRTM, GMTED2010, ETOPO1). Snapping lines: &copy; OpenStreetMap contributors, extracts by BBBike.org.
-            </p>
         </template>
     </div>
 </template>
@@ -368,15 +459,13 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import {
     TablerAlert,
-    TablerEnum,
     TablerIconButton,
     TablerInput,
     TablerLoading,
-    TablerNone,
     TablerProgress,
-    TablerToggle,
 } from '@tak-ps/vue-tabler';
 import {
+    IconChevronRight,
     IconDownload,
     IconMountain,
     IconPlayerStop,
@@ -409,10 +498,10 @@ import {
 import type { Job, JobRequest, ManagedBasemap, Plan, SnapCategory, StateItem } from './api.ts';
 
 const DETAIL: Record<string, number> = {
-    'Low - ~120 m (z10)': 10,
-    'Medium - ~60 m (z11)': 11,
-    'High - ~30 m, DTED Level 2 class (z12)': 12,
-    'Very high - ~15 m (z13)': 13,
+    'Low detail (~120 m)': 10,
+    'Medium detail (~60 m)': 11,
+    'High detail (~30 m, DTED Level 2 class)': 12,
+    'Very high detail (~15 m)': 13,
 };
 const detailOptions = Object.keys(DETAIL);
 
@@ -426,12 +515,24 @@ const detail = ref(detailOptions[2]);
 
 const req = ref<JobRequest>({
     states: [],
-    terrain: { enabled: true, maxzoom: 12, makeDefault: false },
+    terrain: { enabled: true, maxzoom: 12, makeDefault: true },
     snapping: { enabled: true, categories: [], combine: true, makeDefault: false },
 });
 
 const categoryList = ref<SnapCategory[]>([]);
 const categories = ref<Set<string>>(new Set());
+
+// Collapsible sections: only the state list starts open (it is the first thing to choose)
+const open = ref({ states: true, categories: false, layers: false });
+
+const selectedAbbrs = computed(() => states.value.filter((s) => selected.value.has(s.slug)).map((s) => s.abbr));
+
+const categorySummary = computed(() => {
+    const labels = categoryList.value.filter((c) => categories.value.has(c.id)).map((c) => c.label);
+    if (!labels.length) return 'No categories selected';
+    if (labels.length === categoryList.value.length) return 'All categories';
+    return labels.join(', ');
+});
 
 const estimate = ref<Plan | null>(null);
 const planning = ref(false);
@@ -514,6 +615,9 @@ function statusClass(status: Job['status']): string {
 
 function schedulePlan(): void {
     if (planTimer) clearTimeout(planTimer);
+    // Invalidate any estimate still in flight so it can't land after the selection changed
+    planSeq++;
+    planning.value = false;
     estimate.value = null;
     planError.value = '';
     if (!selected.value.size || (!req.value.terrain.enabled && !req.value.snapping.enabled)) return;
@@ -564,17 +668,13 @@ async function registerResults(finished: Job): Promise<void> {
     registerError.value = '';
     await refreshManaged();
     const existing = new Set(managed.value.map((b) => fileFromUrl(b.url)));
-    let snapDefaultSet = false;
     for (const result of finished.results) {
         if (existing.has(result.file) || deletedFiles.value.has(result.file)) continue;
         try {
             const created = await register(result);
+            // The default snapping layer is only set from the star on an imported layer
             if (result.kind === 'terrain' && finished.request.terrain.makeDefault) {
                 await setDefaultTerrain(created.id);
-            } else if (result.kind === 'snapping' && finished.request.snapping.makeDefault && !snapDefaultSet) {
-                // Only one layer can be preselected; with separate states the first one wins
-                await setDefaultSnapping(created.id);
-                snapDefaultSet = true;
             }
         } catch (err) {
             registerError.value = `Could not register ${result.file}: ${err instanceof Error ? err.message : String(err)}. It is still available under Admin -> Hosted Tilesets.`;
@@ -681,9 +781,32 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.tdd-states,
-.tdd-cats {
-    max-height: 260px;
+.tdd-head {
+    cursor: pointer;
+    user-select: none;
+}
+
+.tdd-chev {
+    transition: transform 0.15s ease;
+    flex-shrink: 0;
+}
+
+.tdd-chev--open {
+    transform: rotate(90deg);
+}
+
+.tdd-chips {
+    min-width: 0;
+}
+
+.tdd-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 0.25rem 0.75rem;
+}
+
+.tdd-scroll {
+    max-height: 220px;
     overflow-y: auto;
 }
 

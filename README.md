@@ -23,7 +23,7 @@ CloudTAK's line tool asks the tileset for *every* LineString in a tile (`?type=L
 | Service roads | ✓ | `streets` kind `service`: driveways, parking aisles, alleys |
 | Tracks | ✓ | `streets` kind `track`: forest, farm and 4x4 tracks |
 | Trails & paths | ✓ | `streets` kinds `path`, `footway`, `cycleway`, `bridleway`, `steps`, `pedestrian` |
-| Railways | | `streets` rail kinds / `rail=true` |
+| Railways | ✓ | `streets` rail kinds / `rail=true` |
 | Rivers & canals | | `water_lines` kinds `river`, `canal` |
 | Streams & ditches | | `water_lines` kinds `stream`, `ditch`, `drain` |
 | Runways & taxiways | | `streets` kinds `runway`, `taxiway` |
@@ -51,9 +51,9 @@ These choices come from reading CloudTAK's source rather than guessing:
 
 1. Open **Menu → Terrain Data Downloader** (CloudTAK system administrators only, see [Admin only](#admin-only)).
 2. Tick one or more states (filter box, All/None buttons).
-3. Choose **Terrain** and its detail level, and/or **Snapping** with the line categories to include (Defaults / All / None shortcuts) and whether to combine states.
-   Tick **Make this the CloudTAK default terrain** and/or **Make this the default snapping layer** to apply the defaults as soon as the layers are registered.
-4. Check the estimate, then press **Download & import**. Progress and a log are shown. You can leave the page; the job keeps running on the server and the page resumes it when reopened.
+3. Switch on **Download Terrain** (pick a detail level) and/or **Download Snapping**. The snapping card shows the included categories as one line; **Customize** opens the checklist (Defaults / All / None). With several states, choose whether to combine them. Sections stay collapsed until you need them.
+   **Make this the CloudTAK default terrain** is ticked by default and applies as soon as the terrain is registered. Untick it to keep your current default.
+4. Check the estimate, then press **Download**. Progress and a log are shown. You can leave the page; the job keeps running on the server and the page resumes it when reopened.
 5. When the job finishes, the layers are registered automatically in the **Terrain Data Downloader** overlay collection:
    - Users add the terrain from **Overlays**. Snapping layers appear in the line tool's snapping list.
    - The **star** on any imported layer makes it (or stops it being) the default. A filled star marks the current default.
