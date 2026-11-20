@@ -118,12 +118,12 @@ for (let i = 0; i < layer.length; i++) {
     const f = layer.feature(i);
     assert.equal(f.type, 2, 'non-LineString kept');
     const k = String(f.properties.kind);
-    assert.ok(!['runway', 'taxiway'].includes(k), `non-default kind kept: ${k}`);
+    assert.ok(!['rail', 'light_rail', 'subway', 'tram', 'runway', 'taxiway'].includes(k), `non-default kind kept: ${k}`);
     assert.ok(DEFAULT_CATS.has(String(f.properties.category)), `bad category ${f.properties.category}`);
     kinds.set(k, (kinds.get(k) || 0) + 1);
     f.loadGeometry();
 }
-assert.ok(DEFAULT_CATS.has('railways') && [...kinds.keys()].some((k) => k === 'rail'), 'railways are a default category and Wilmington has rail');
+assert.ok(!DEFAULT_CATS.has('railways'), 'railways are not a default category');
 console.log(`ok - Wilmington z14 tile decodes: ${layer.length} LineStrings, kinds`, Object.fromEntries(kinds));
 
 // Category isolation: each category alone contains only itself, and the parts add up to the whole

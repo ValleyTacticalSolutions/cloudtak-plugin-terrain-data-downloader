@@ -97,7 +97,7 @@ const SNAP_CATEGORIES: SnapCategory[] = [
         layers: ['streets'], match: (_l, kind, rail) => !rail && kind !== null && TRAIL_KINDS.has(kind),
     },
     {
-        id: 'railways', label: 'Railways', description: 'Rail, light rail, tram, subway', default: true,
+        id: 'railways', label: 'Railways', description: 'Rail, light rail, tram, subway', default: false,
         layers: ['streets'], match: (_l, kind, rail) => rail || (kind !== null && RAIL_KINDS.has(kind)),
     },
     {

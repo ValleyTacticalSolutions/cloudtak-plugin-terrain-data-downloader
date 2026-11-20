@@ -23,7 +23,7 @@ CloudTAK's line tool asks the tileset for *every* LineString in a tile (`?type=L
 | Service roads | ✓ | `streets` kind `service`: driveways, parking aisles, alleys |
 | Tracks | ✓ | `streets` kind `track`: forest, farm and 4x4 tracks |
 | Trails & paths | ✓ | `streets` kinds `path`, `footway`, `cycleway`, `bridleway`, `steps`, `pedestrian` |
-| Railways | ✓ | `streets` rail kinds / `rail=true` |
+| Railways | | `streets` rail kinds / `rail=true` |
 | Rivers & canals | | `water_lines` kinds `river`, `canal` |
 | Streams & ditches | | `water_lines` kinds `stream`, `ditch`, `drain` |
 | Runways & taxiways | | `streets` kinds `runway`, `taxiway` |
