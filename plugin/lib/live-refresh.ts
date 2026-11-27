@@ -8,12 +8,21 @@
  * MapLibre drops tiles cached from the previous file (the tile URLs stay the same because the
  * master basemap keeps its id).
  */
-import OverlayManager from '../../../src/base/overlay.ts';
-import { useMapStore } from '../../../src/stores/map.ts';
-import { stdurl } from '../../../src/std.ts';
+import { apiUrl } from './host.ts';
+
+// The overlay list lives in CloudTAK's own database and managers, which only the compiled web
+// build can reach. In the runtime bundle (native apps) these imports are replaced by a module
+// that throws, and the caller falls back to asking the user to use Settings -> Refresh App.
+async function core() {
+    const [{ default: OverlayManager }, { useMapStore }] = await Promise.all([
+        import('../../../src/base/overlay.ts'),
+        import('../../../src/stores/map.ts')
+    ]);
+    return { OverlayManager, mapStore: useMapStore() };
+}
 
 export async function showTerrainNow(basemapId: number, name: string): Promise<void> {
-    const mapStore = useMapStore();
+    const { OverlayManager, mapStore } = await core();
     const modeId = String(basemapId);
 
     await OverlayManager.sync();
@@ -30,7 +39,7 @@ export async function showTerrainNow(basemapId: number, name: string): Promise<v
     if (existing) await OverlayManager.deleteLoaded(existing);
 
     await OverlayManager.createLoaded({
-        url: String(stdurl(`/api/basemap/${basemapId}/tiles`)),
+        url: String(await apiUrl(`/api/basemap/${basemapId}/tiles`)),
         name,
         mode: 'overlay',
         mode_id: modeId,
@@ -41,6 +50,7 @@ export async function showTerrainNow(basemapId: number, name: string): Promise<v
 
 /** Remove the terrain overlay from the current map after the master terrain layer was deleted */
 export async function dropTerrainNow(basemapId: number): Promise<void> {
+    const { OverlayManager } = await core();
     const existing = OverlayManager.loadedByMode('overlay', String(basemapId));
     if (existing) await OverlayManager.deleteLoaded(existing);
 }

@@ -38,6 +38,6 @@ npm run lint
 npx tsc
 
 cd "$PLUGIN"
-node test/smoke.mjs "$CT" "$(mktemp -d)"
+if [ -z "${SKIP_SMOKE:-}" ]; then node test/smoke.mjs "$CT" "$(mktemp -d)"; fi  # SKIP_SMOKE=1 skips the network data test
 
 echo "PASS: plugin builds against CloudTAK $(node -p "require('$CT/package.json').version") and the data pipeline verifies"

@@ -1,7 +1,8 @@
 import type { App } from 'vue';
 import { h } from 'vue';
-import type { PluginAPI, PluginInstance } from '../../plugin.ts';
-import MenuTemplate from '../../src/components/CloudTAK/util/MenuTemplate.vue';
+import type { PluginAPI, PluginInstance } from '@tak-ps/cloudtak';
+import MenuTemplate from './lib/vendor/MenuTemplate.vue';
+import { setHost } from './lib/host.ts';
 import { IconMountain } from '@tabler/icons-vue';
 import TerrainDownloader from './lib/TerrainDownloader.vue';
 import { ROUTE_NAME, MENU_KEY } from './lib/api.ts';
@@ -11,6 +12,7 @@ export default class TerrainDataDownloader implements PluginInstance {
 
     constructor(api: PluginAPI) {
         this.api = api;
+        setHost(api);
 
         // Routes are registered once and never removed: CloudTAK may call disable()
         // before enable(), and menu.add() silently fails if its route is missing.

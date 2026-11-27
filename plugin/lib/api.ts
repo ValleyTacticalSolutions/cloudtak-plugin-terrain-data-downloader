@@ -3,7 +3,7 @@
  * which handles the base URL and auth token. Layer registration, defaults and cleanup
  * happen on the server, so a job completes correctly even if this page is closed.
  */
-import { std } from '../../../src/std.ts';
+import { apiFetch } from './host.ts';
 
 export const DEST = 'terrain-data-downloader';
 // Must start with 'home-menu': CloudTAK only opens the side panel for routes named home-menu*
@@ -16,14 +16,14 @@ const BASE = '/api/plugin/terrain-data-downloader';
 export const ROUTES_MISSING = 'Plugin API routes are not installed (404)';
 
 /**
- * std() for this plugin's own routes. A missing route normally comes back as a 404
+ * apiFetch() for this plugin's own routes. A missing route normally comes back as a 404
  * ("API endpoint does not exist!"), but a proxy in front of CloudTAK can answer with an
- * HTML page instead, in which case std() hands back a raw Response rather than JSON.
+ * HTML page instead, in which case apiFetch() hands back text rather than JSON.
  */
-async function pstd(url: string, opts: Parameters<typeof std>[1] = {}): Promise<unknown> {
-    const res = await std(url, opts);
-    if (res instanceof Response) {
-        throw new Error(`${ROUTES_MISSING}: ${url} returned ${res.headers.get('Content-Type') || 'a non-JSON response'}`);
+async function pstd(url: string, opts: Parameters<typeof apiFetch>[1] = {}): Promise<unknown> {
+    const res = await apiFetch(url, opts);
+    if (typeof res === 'string') {
+        throw new Error(`${ROUTES_MISSING}: ${url} returned a non-JSON response`);
     }
     return res;
 }

@@ -2,7 +2,7 @@
 
 A CloudTAK plugin that downloads public elevation data and OpenStreetMap line data (roads, trails and, if you choose, railways, rivers and more) for the US states you tick in a checklist, converts them into the formats CloudTAK uses natively, and imports them as server-wide CloudTAK layers. The terrain powers 3D terrain, elevation readouts and slope shading. The snapping layer lets the line tool snap to the lines you selected. Only CloudTAK system administrators can use it.
 
-**Minimum CloudTAK: v13.124.0**. Built and verified against CloudTAK v13.124.0 (commit 5cb43c9, 2026-11-20). No upper limit: newer CloudTAK versions are expected to work. Report breakage as an issue.
+**Minimum CloudTAK: v14.4.1**. Built and verified against CloudTAK v14.4.1 (commit 184ecb2, 2026-11-27). No upper limit: newer CloudTAK versions are expected to work. Report breakage as an issue.
 
 ## What it does
 
@@ -153,7 +153,7 @@ A single job is limited to 250,000 terrain tiles. Large states such as Alaska ne
   "detect": ["api/web/plugins/terrain-data-downloader/index.ts", "app/plugins/terrain-data-downloader/index.ts"]
 }
 ```
-<!-- Requires CloudTAK v13.124.0 or newer (catalog has no version field; this note is for reviewers). -->
+<!-- Requires CloudTAK v14.4.1 or newer (catalog has no version field; this note is for reviewers). -->
 
 To list it: submit the repo URL through TAK Portal's CloudTAK Marketplace plugin request form, or open an issue/PR on ValleyTacticalSolutions/TAK-Portal adding the entry to `catalog/cloudtak-plugins.json`.
 
@@ -173,15 +173,26 @@ cp server/*.ts "$CT/api/stateless/routes/"
 
 The web half uses these CloudTAK internals. Check them on CloudTAK upgrades:
 
-- `../../plugin.ts` (`PluginAPI`, `PluginInstance`): `routes.add`, `menu.add/remove`, `profile.get('system_admin')`, `pinia`
-- `../../src/components/CloudTAK/util/MenuTemplate.vue`
-- `../../../src/std.ts` (`std`)
-- `../../../src/stores/map.ts` (`useMapStore`): `reconcileOverlays()` (live terrain refresh)
-- `../../../src/base/overlay.ts` (`OverlayManager`): `sync`, `loaded`, `loadedByMode`, `createLoaded`, `deleteLoaded`, overlay `update({ visible })`, used to show the rebuilt terrain without a reload
+- `@tak-ps/cloudtak` (types only: `PluginAPI`, `PluginInstance`): `routes.add`, `menu.add/remove`
+- `plugin/lib/host.ts`: server URL, token and `apiFetch`, local to the plugin because `PluginAPI` has no authenticated-fetch helper. It also reads the host's `cloudtak-app` store from `api.pinia`.
+- `plugin/lib/vendor/MenuTemplate.vue`: copy of CloudTAK's menu frame. Re-sync it when CloudTAK changes the menu chrome.
+- Optional, compiled build only (`plugin/lib/live-refresh.ts`, dynamic imports): `../../../src/stores/map.ts` (`reconcileOverlays()`) and `../../../src/base/overlay.ts` (`OverlayManager`: `sync`, `loaded`, `loadedByMode`, `createLoaded`, `deleteLoaded`, overlay `update({ visible })`), used to show the rebuilt terrain without a reload. The mobile bundle replaces these with a stub, and the page then asks the user to use Settings -> Refresh App.
 
 The browser only calls this plugin's own API routes.
 
 The server half uses `../../common/auth.js` (`Auth.as_user(..., { admin: true })`), `../../common/aws/s3.js` (`S3.put`, `S3.get`, `S3.exists`, `S3.del`), `config.models.Basemap.list` (finding layers from earlier plugin versions), `config.models.Setting.typed('map::terrain')`, `config.SigningSecret` / `API_URL` / `PMTILES_URL`, and `jsonwebtoken`. It registers layers by calling CloudTAK's own `POST/PATCH/DELETE /api/basemap` and `PUT /api/config` with a server-minted admin token for the job's user, the same way CloudTAK's import worker calls the API.
+
+## Mobile (CloudTAK iOS/Android app)
+
+The mobile bundle needs **CloudTAK v14.4.1 or newer** (runtime plugins, the same minimum as the compiled Marketplace install).
+
+The native apps only run runtime bundles, not plugins compiled into the web build. The bundle is the web half only, so **the server route must still be installed on the CloudTAK server** (the Marketplace install, or the manual steps above) and the API image rebuilt.
+
+1. Build: `npm install && npm run bundle` creates `release/terrain-data-downloader-<version>.tar.gz` (`manifest.json` + `index.js`). GitHub releases carry the same file.
+2. Upload (CloudTAK admin): `POST /api/plugin/bundle` with the tar.gz.
+3. On the phone: **Settings -> Plugins**, then load Terrain Data Downloader. It is stored on the device and loads offline.
+
+The bundle contains everything except `vue`, `vue-router` and `@tak-ps/vue-tabler`, which the app provides. After a job, a new terrain layer appears on the current map only in the web build. In the app, use **Settings -> Refresh App**.
 
 ## Plugin API routes
 
@@ -204,6 +215,7 @@ All routes require a CloudTAK system administrator.
 # (app lint, vue-tsc, vite build, API oxlint + tsc), then runs the data smoke test.
 bash verify-cloudtak.sh                 # fresh clone of CloudTAK main
 CT_DIR=/path/to/CloudTAK bash verify-cloudtak.sh
+SKIP_SMOKE=1 CT_DIR=/path/to/CloudTAK bash verify-cloudtak.sh   # skip the network data test
 ```
 
 `test/smoke.mjs` downloads Delaware's data and checks the output with the official `pmtiles` and `@mapbox/vector-tile` readers. It covers tile IDs, Range-based zip extraction, snapping categories (each category exclusive, all categories adding up to the whole), border-tile merging, byte-identical terrain tiles, and leaf directories.
